@@ -1,0 +1,6 @@
+# FTOI/FTOU always round towards 0 (RXv1 manual: FTOI); 0x3FE00000 = 1.75f, 0xBFE00000 = -1.75f,
+# 0x4F32D05E = 3.0e9f
+ftoi_trunc  | fc 97 21 | R2=0x3FE00000 | FTOI R2,R1      | R1=1
+ftoi_neg    | fc 97 21 | R2=0xBFE00000 | FTOI R2,R1      | R1=0xFFFFFFFF
+ftou_trunc  | fc a7 21 | R2=0x3FE00000 | FTOU R2,R1      | R1=1
+ftou_big    | fc a7 21 | R2=0x4F32D05E | FTOU R2,R1 | R1=0xB2D05E00

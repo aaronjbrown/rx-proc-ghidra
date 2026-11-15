@@ -1,0 +1,11 @@
+# Data byte order follows the language; instruction encoding does not (RX fetches code as
+# little-endian words, so code presented in fetch order decodes the same in both variants).
+# MOV.L R1,[R2]
+be_store_l | e3 21 | R1=0x11223344 R2=0x2000 | MOV.L R1,[R2] | mem8[0x2000]=0x11 mem8[0x2003]=0x44 | be
+le_store_l | e3 21 | R1=0x11223344 R2=0x2000 | MOV.L R1,[R2] | mem8[0x2000]=0x44 mem8[0x2003]=0x11 | le
+# MOV.B [R2],R1 / MOV.W [R2],R1 read the first byte/halfword at the address
+be_load_b  | cc 21 | R2=0x2000 mem32[0x2000]=0x11223344 | MOV.B [R2],R1 | R1=0x11   | be
+le_load_b  | cc 21 | R2=0x2000 mem32[0x2000]=0x11223344 | MOV.B [R2],R1 | R1=0x44   | le
+be_load_w  | dc 21 | R2=0x2000 mem32[0x2000]=0x11223344 | MOV.W [R2],R1 | R1=0x1122 | be
+# BSET #0 on a byte is the same byte in either order; a word written .L then tested by byte is not
+be_bset_b  | f0 10 | R1=0x2003 mem32[0x2000]=0 | - | mem32[0x2000]=0x1 | be

@@ -1,0 +1,9 @@
+# DIV/DIVU: O set on divide-by-zero or -2^31/-1, cleared otherwise; Rd is undefined when O=1 (manual).
+# The Ghidra emulator traps on x/0 (hardware sets O); decoding and branch-freedom are still checked.
+div_imm    | fd 74 81 03 | R1=10 O=1      | DIV #0x3,R1  | R1=3 O=0 nobranch
+div_neg    | fd 74 81 fd | R1=10          | DIV #-0x3,R1 | R1=0xFFFFFFFD O=0
+div_zero   | fd 74 81 00 | R1=10          | DIV #0x0,R1  | noemu nobranch
+divu_zero  | fc 27 21    | R1=10 R2=0     | DIVU R2,R1   | noemu nobranch
+div_ovf    | fc 23 21    | R1=0x80000000 R2=0xFFFFFFFF | DIV R2,R1 | O=1
+divu_imm   | fd 74 91 03 | R1=10 O=1      | DIVU #0x3,R1 | R1=3 O=0 nobranch
+divu_big   | fc 27 21    | R1=0xFFFFFFFE R2=2 | DIVU R2,R1 | R1=0x7FFFFFFF O=0

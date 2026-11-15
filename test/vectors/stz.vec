@@ -1,0 +1,6 @@
+# binutils rx-decode.opc: FC 4B = stz Rs,Rd ; FC 4F = stnz Rs,Rd
+stz_taken    | fc 4b ec    | Z=1 R14=7 R12=0 | STZ R14,R12  | R12=7
+stz_not      | fc 4b ec    | Z=0 R14=7 R12=0 | STZ R14,R12  | R12=0
+stnz_taken   | fc 4f ec    | Z=0 R14=7 R12=0 | STNZ R14,R12 | R12=7
+stnz_not     | fc 4f ec    | Z=1 R14=7 R12=0 | STNZ R14,R12 | R12=0
+stz_imm      | fd 74 e1 05 | Z=1 R1=0        | STZ #0x5,R1  | R1=5

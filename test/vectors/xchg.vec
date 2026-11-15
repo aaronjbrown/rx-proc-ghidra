@@ -1,0 +1,3 @@
+# XCHG dsp[Rs].memex,Rd: memory extended per memex into Rd, low bytes of Rd stored
+xchg_mem_ub | fc 40 21 | R2=0x2000 R1=0x1234 mem8[0x2000]=0x7F | - | R1=0x7F mem8[0x2000]=0x34
+xchg_mem_l  | 06 a0 10 21 | R2=0x2000 R1=0x11223344 mem32[0x2000]=0x55667788 | - | R1=0x55667788 mem32[0x2000]=0x11223344

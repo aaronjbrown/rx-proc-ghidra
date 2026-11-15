@@ -1,0 +1,9 @@
+# SHLL: C = last bit shifted out; O = 0 iff the result MSB equals every shifted-out bit;
+# C and O cleared when the shift count is 0 (RXv1 manual). No internal branches.
+# SHAR #imm,Rs,Rd: flags from the result
+shll_ovf   | 6c 31    | R1=0x60000001     | SHLL #0x3,R1    | R1=0x8 C=1 O=1 nobranch
+shll_noovf | 6c 31    | R1=0xF0000000     | SHLL #0x3,R1    | R1=0x80000000 C=1 O=0 S=1 nobranch
+shll_zero  | fd 62 21 | R1=5 R2=0 C=1 O=1 | SHLL R2,R1      | R1=5 C=0 O=0 nobranch
+shll_31    | 6d f1    | R1=3              | SHLL #0x1f,R1   | R1=0x80000000 C=1 O=1 nobranch
+shll3      | fd c3 21 | R2=1              | SHLL #0x3,R2,R1 | R1=8 C=0 O=0 nobranch
+shar3_flags | fd a2 21 | R2=2          | SHAR #0x2,R2,R1 | R1=0 Z=1 C=1

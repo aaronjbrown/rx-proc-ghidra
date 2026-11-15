@@ -1,6 +1,8 @@
 # sleigh include file for RXv2 language instructions
+# Instruction tokens are little-endian in every variant: RX fetches code as little-endian words
+# even when data is big-endian, so code must be presented to Ghidra in fetch order.
 
-define token opbyte (8)
+define token opbyte (8) endian=little
    op0_8     = (0,7)
    op6_2     = (6,7)
    op5_3     = (5,7)
@@ -90,7 +92,7 @@ define context contextreg
    pass_dsp = (24,31) noflow
 ;
 
-define token data8 (8)
+define token data8 (8) endian=little
    imm0_3   = (0,2)
    imm4     = (0,3)
    imm8		= (0,7)
@@ -98,19 +100,19 @@ define token data8 (8)
    simm8    = (0,7) signed
 ;
 
-define token data16 (16)
+define token data16 (16) endian=little
    timm4        = (12,15)
    imm16        = (0,15)
    sign16	= (15,15)
    simm16	= (0,15) signed
 ;
 
-define token data24 (24)
+define token data24 (24) endian=little
    imm24        = (0,23)
    simm24       = (0,23) signed
 ;
 
-define token data32 (32)
+define token data32 (32) endian=little
    imm32        = (0,31)
    simm32       = (0,31) signed
 ;
@@ -136,17 +138,53 @@ macro setResultFlags(result) {
 	$(S_flag) = (result s< 0);
 }
 
-macro setAddCarryFlags(op1,op2) {
-	$(C_flag) = (carry(op1,zext($(C_flag))) || carry(op2,op1 + zext($(C_flag))));
+# dest = dest + src + C, flags from the three-input addition (RXv1 manual: ADC)
+macro addWithCarry(dest, src) {
+	local cin:4 = zext($(C_flag));
+	local res:4 = dest + src + cin;
+	$(C_flag) = carry(dest, src) || carry(dest + src, cin);
+	$(O_flag) = ((~(dest ^ src)) & (dest ^ res)) s< 0;
+	dest = res;
+	setResultFlags(dest);
+}
+
+# dest = dest - src - !C, C = no unsigned borrow (RXv1 manual: SBB)
+macro subWithBorrow(dest, src) {
+	local bin:8 = zext($(C_flag) == 0);
+	local res:4 = dest - src - bin:4;
+	local d8:8 = zext(dest);
+	local s8:8 = zext(src);
+	$(C_flag) = d8 >= (s8 + bin);
+	$(O_flag) = ((dest ^ src) & (dest ^ res)) s< 0;
+	dest = res;
+	setResultFlags(dest);
+}
+
+# SHLL: dest = src << (count & 31). C = last bit shifted out; O = 0 iff the result MSB equals every
+# shifted-out bit; both cleared when the count is 0 (RXv1 manual). Branch-free.
+macro shiftLeft(dest, src, count) {
+	local n:4 = count & 31;
+	local nz:1 = n != 0;
+	local top:4 = src s>> (31 - n);
+	$(C_flag) = nz && (((src >> (32 - n)) & 1) != 0);
+	$(O_flag) = nz && (top != 0) && (top != 0xFFFFFFFF);
+	dest = src << n;
+	setResultFlags(dest);
+}
+
+# DIV/DIVU: dest is undefined when O is set (RXv1 manual), so the quotient is written unconditionally.
+macro divSigned(dest, divisor) {
+	$(O_flag) = (divisor == 0) || ((dest == 0x80000000) && (divisor == 0xFFFFFFFF));
+	dest = dest s/ divisor;
+}
+
+macro divUnsigned(dest, divisor) {
+	$(O_flag) = (divisor == 0);
+	dest = dest / divisor;
 }
 
 macro setAddFlags(op1,op2) {
 	$(C_flag) = carry(op1,op2);
-}
-
-macro setSubtractCarryFlags(op1,op2) {
-	notC = ~$(C_flag);
-	$(C_flag) = ((op1 < sext(notC)) || (op2 < (op1 - sext(notC))));
 }
 
 macro setSubtractFlags(op1,op2) {
@@ -321,10 +359,12 @@ szRiRb_dst: [reg0_4, reg4_4]    is sz4_2 = 0x2 & reg0_4; reg4_4 { local tmp:4 = 
 
 
 ## Memory infix version of LD source operand with displacement that scales by size of data
-ld_src: szld_src          is mode_ld = 0x3  & szld_src         [ mode_sz = mode_mi; ] { build szld_src; export szld_src; }
+# Register direct (ld=11) is always the whole 32-bit register: memex only sizes memory operands.
+# (szld_src/szldu_src keep their sized register cases for MOV/MOVU Rs,Rd.)
+ld_src: reg4_4            is mode_ld = 0x3  & reg4_4                                   { local tmp:4 = reg4_4; export tmp; }
 ld_src: szld_src^szdsc    is mode_ld != 0x3 & szld_src & szdsc [ mode_sz = mode_mi; ] { build szld_src; export szld_src; }
 
-ldu_src: szldu_src        is mode_ld = 0x3  & szldu_src         [ mode_sz = mode_mi; ] { build szldu_src; export szldu_src; }
+ldu_src: reg4_4           is mode_ld = 0x3  & reg4_4                                    { local tmp:4 = reg4_4; export tmp; }
 ldu_src: szldu_src^szdsc  is mode_ld != 0x3 & szldu_src & szdsc [ mode_sz = mode_mi; ] { build szldu_src; export szldu_src; }
 
 ## Memory infix version of LD destination operand with displacement that scales by size of data
@@ -493,27 +533,18 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 ### ADC src, dest
 ### ADC #SIMM, Rd
 :ADC liop, reg0_4 is op0_8 = 0xFD; (op4_4 = 0x7 & li2_2 & ld0_2 = 0x0); (op4_4 = 0x2 & reg0_4); liop [ mode_li = li2_2; ] {
-     setAddCarryFlags(reg0_4, liop);
-     setAddOverflowFlags(reg0_4, liop);
-     reg0_4 = reg0_4 + liop + zext($(C_flag));
-     setResultFlags(reg0_4);
+     addWithCarry(reg0_4, liop);
 }
 
 ## ADC Rs, Rd
 :ADC reg4_4, reg0_4 is op0_8 = 0xFC; op0_8 = 0x0B; reg4_4 & reg0_4 {
-     setAddCarryFlags(reg0_4, reg4_4);
-     setAddOverflowFlags(reg0_4, reg4_4);
-     reg0_4 = reg0_4 + reg4_4 + zext($(C_flag));
-     setResultFlags(reg0_4);
+     addWithCarry(reg0_4, reg4_4);
 }
 
 ## ADC dsp[Rs].L, Rd
 :ADC ld_src, reg0_4 is op0_8 = 0x06; (mi6_2 = 0x02 & mi6_2 & op2_4 = 0x08 & ld0_2 < 0b11 & ld0_2); op0_8 = 0x02; (reg4_4 & reg0_4) ... & ld_src
 	[ mode_ld = ld0_2; mode_mi = mi6_2; ] {
-	setAddCarryFlags(ld_src, reg0_4);
-	setAddOverflowFlags(ld_src, reg0_4);
-	reg0_4 = reg0_4 + ld_src + zext($(C_flag));
-	setResultFlags(reg0_4);
+	addWithCarry(reg0_4, ld_src);
 }
 
 # ADD - addition without carry
@@ -606,7 +637,8 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 
 ## BCLR Rs, dsp[Rd]
 :BCLR reg0_4, ld_dst       is op0_8 = 0xFC; op2_6 = 0b11001 & ld0_2 != 0b11 & ld0_2; reg0_4 ... & ld_dst [ mode_ld = ld0_2; mode_mi = 0; ] {
-	*:4 ld_dst = (*:4 ld_dst) & ~(1 << (reg0_4 & 31));
+	local bitmask:1 = 1 << (reg0_4:1 & 7);
+	*:1 ld_dst = (*:1 ld_dst) & ~bitmask;
 }
 
 
@@ -674,7 +706,8 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 
 ## BNOT reg, dsp[Rd]
 :BNOT reg0_4, ld_dst    is op0_8 = 0xFC; op2_6 = 0b11011 & ld0_2 != 0b11 & ld0_2; reg0_4 ... & ld_dst [ mode_ld = ld0_2; mode_mi = 0; ] {
-	*:4 ld_dst = (*:4 ld_dst) ^ (1 << (reg0_4 & 31));
+	local bitmask:1 = 1 << (reg0_4:1 & 7);
+	*:1 ld_dst = (*:1 ld_dst) ^ bitmask;
 }
 
 ## BNOT #IMM:5, reg
@@ -684,7 +717,7 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 
 ## BNOT reg, reg
 :BNOT reg0_4, reg4_4    is op0_8 = 0xFC; op2_6 = 0b11011 & ld0_2 = 0b11; reg4_4 & reg0_4 {
-	reg4_4 = reg4_4 ^ (reg0_4 & 31);
+	reg4_4 = reg4_4 ^ (1 << (reg0_4 & 31));
 }
 
 
@@ -742,8 +775,8 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 
 ## BSET Rs, dsp[Rd]
 :BSET reg0_4, ld_dst    is op0_8 = 0xFC; op2_6 = 0b11000 & ld0_2 != 0b11 & ld0_2; reg0_4 ... & ld_dst [ mode_ld = ld0_2; mode_mi = 0; ] {
-	local bitmask:4 = 1 << (reg0_4 & 31);
-	*:4 ld_dst = (*:4 ld_dst) | bitmask;
+	local bitmask:1 = 1 << (reg0_4:1 & 7);
+	*:1 ld_dst = (*:1 ld_dst) | bitmask;
 }
 
 ## BSET #IMM:5, Rd
@@ -880,66 +913,36 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 # DIV
 ## DIV #SIMM, Rd
 :DIV liop, reg0_4    is op0_8 = 0xFD; op4_4 = 0x7 & li2_2 & op0_2 = 0b00; op4_4 = 8 & reg0_4; liop [ mode_li = li2_2; ] {
-	if (liop == 0 || (liop == -2147483648 && reg0_4 == -1)) goto <overflow>;
-		reg0_4 = reg0_4 s/ liop;
-		goto <end>;
-	<overflow>
-		$(O_flag) = 1;
-	<end>
+	divSigned(reg0_4, liop);
 }
 
 ## DIV dsp[Rs].memex, Rd
 ## when memex == UB or src == Rs
 :DIV ld_src, reg0_4    is op0_8 = 0xFC; op2_6 = 0b1000 & ld0_2; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = 4; ] {
-	if (ld_src == 0 || (ld_src == -2147483648 && reg0_4 == -1)) goto <overflow>;
-		reg0_4 = reg0_4 s/ ld_src;
-		goto <end>;
-	<overflow>
-		$(O_flag) = 1;
-	<end>
+	divSigned(reg0_4, ld_src);
 }
 
 ## when memex != UB
 :DIV  ld_src, reg0_4    is op0_8 = 0x06; mi6_2 & op2_4 = 0b1000 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x08; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = mi6_2; ] {
-	if (ld_src == 0 || (ld_src == -2147483648 && reg0_4 == -1)) goto <overflow>;
-		reg0_4 = reg0_4 s/ ld_src;
-		goto <end>;
-	<overflow>
-		$(O_flag) = 1;
-	<end>
+	divSigned(reg0_4, ld_src);
 }
 
 
 # DIVU
 ## DIVU #SIMM, Rd
 :DIVU liop, reg0_4    is op0_8 = 0xFD; op4_4 = 0x7 & li2_2 & op0_2 = 0b00; op4_4 = 0x9 & reg0_4; liop [ mode_li = li2_2; ] {
-	if (liop == 0) goto <overflow>;
-		reg0_4 = reg0_4 / liop;
-		goto <end>;
-	<overflow>
-		$(O_flag) = 1;
-	<end>
+	divUnsigned(reg0_4, liop);
 }
 
 ## DIVU dsp[Rs].memex, Rd
 ## when memex == UB or src == Rs
 :DIVU ld_src, reg0_4    is op0_8 = 0xFC; op2_6 = 0b1001 & ld0_2; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = 4; ] {
-	if (ld_src == 0) goto <overflow>;
-		reg0_4 = reg0_4 / ld_src;
-		goto <end>;
-	<overflow>
-		$(O_flag) = 1;
-	<end>
+	divUnsigned(reg0_4, ld_src);
 }
 
 ## when memex != UB
 :DIVU ld_src, reg0_4    is op0_8 = 0x06; mi6_2 & op2_4 = 0b1000 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x09; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = mi6_2; ] {
-	if (ld_src == 0) goto <overflow>;
-		reg0_4 = reg0_4 / ld_src;
-		goto <end>;
-	<overflow>
-		$(O_flag) = 1;
-	<end>
+	divUnsigned(reg0_4, ld_src);
 }
 
 
@@ -1120,16 +1123,16 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 
 # FTOI - float to signed integer p. 103
 :FTOI ld_src, reg0_4    is op0_8 = 0xFC; op2_6 = 0b100101 & ld0_2; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = 0x2; ] {
-    # TODO: FPSW flags, rounding
-    reg0_4 = round(ld_src);
+    # TODO: FPSW flags. Always rounds towards 0 (RXv1 manual: FTOI/FTOU)
+    reg0_4 = trunc(ld_src);
     setResultFlags(reg0_4);
 }
 
 
 # FTOU - float to unsigned integer p. 106
 :FTOU ld_src, reg0_4    is op0_8 = 0xFC; op2_6 = 0b101001 & ld0_2; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = 0x2; ] {
-    # TODO: FPSW flags, rounding
-    reg0_4 = round(ld_src);
+    # TODO: FPSW flags. Always rounds towards 0 (RXv1 manual: FTOI/FTOU)
+    reg0_4 = trunc(ld_src);
     setResultFlags(reg0_4);
 }
 
@@ -1188,7 +1191,7 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 # MAX - max value select
 ## MAX #SIMM, Rd
 :MAX liop, reg0_4    is op0_8 = 0xFD; op4_4 = 0x7 & li2_2 & op0_2 = 0b00; op4_4 = 0x4 & reg0_4; liop [ mode_li = li2_2; ] {
-	if (liop > reg0_4) goto <skip>;
+	if (liop s<= reg0_4) goto <skip>;
 		reg0_4 = liop;
 	<skip>
 }
@@ -1196,14 +1199,14 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 ## MAX dsp[Rs], Rd
 ## when memex == UB or src == Rs
 :MAX ld_src, reg0_4    is op0_8 = 0xFC; op2_6 = 0b100 & ld0_2; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = 4; ] {
-	if (ld_src > reg0_4) goto <skip>;
+	if (ld_src s<= reg0_4) goto <skip>;
 		reg0_4 = ld_src;
 	<skip>
 }
 
 ## when memex != UB
-:MAX ld_src, reg0_4    is op0_8 = 0x06; mi6_2 & op2_4 = 0b1000 & ld0_2; op0_8 = 0x04; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = mi6_2; ] {
-	if (ld_src > reg0_4) goto <skip>;
+:MAX ld_src, reg0_4    is op0_8 = 0x06; mi6_2 & op2_4 = 0b1000 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x04; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = mi6_2; ] {
+	if (ld_src s<= reg0_4) goto <skip>;
 		reg0_4 = ld_src;
 	<skip>
 }
@@ -1212,7 +1215,7 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 # MIN
 ## MIN #SIMM, Rd
 :MIN liop, reg0_4    is op0_8 = 0xFD; op4_4 = 0x7 & li2_2 & op0_2 = 0b00; op4_4 = 0x5 & reg0_4; liop [ mode_li = li2_2; ] {
-	if (liop > reg0_4) goto <skip>;
+	if (liop s>= reg0_4) goto <skip>;
 		reg0_4 = liop;
 	<skip>
 }
@@ -1220,14 +1223,14 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 ## MIN dsp[Rs], Rd
 ## when memex == UB or src == Rs
 :MIN ld_src, reg0_4    is op0_8 = 0xFC; op2_6 = 0b101 & ld0_2; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = 4; ] {
-	if (ld_src > reg0_4) goto <skip>;
+	if (ld_src s>= reg0_4) goto <skip>;
 		reg0_4 = ld_src;
 	<skip>
 }
 
 ## when memex != UB
-:MIN ld_src, reg0_4    is op0_8 = 0x06; mi6_2 & op2_4 = 0b1000 & ld0_2; op0_8 = 0x05; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = mi6_2; ] {
-	if (ld_src > reg0_4) goto <skip>;
+:MIN ld_src, reg0_4    is op0_8 = 0x06; mi6_2 & op2_4 = 0b1000 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x05; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = mi6_2; ] {
+	if (ld_src s>= reg0_4) goto <skip>;
 		reg0_4 = ld_src;
 	<skip>
 }
@@ -1630,28 +1633,18 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 
 ## ROLC - rotation with carry to left
 :ROLC reg0_4    is op0_8 = 0x7E; op4_4 = 0x5 & reg0_4 {
-    local highbit:1 = reg0_4[31,1];
-    $(C_flag) = highbit;
-    reg0_4 = reg0_4 << 1;
-
-    if (highbit == 0) goto <end>;
-    reg0_4 = reg0_4 | 1;
-
-    <end>
+    local cin:4 = zext($(C_flag));
+    $(C_flag) = reg0_4[31,1];
+    reg0_4 = (reg0_4 << 1) | cin;
     setResultFlags(reg0_4);
 }
 
 
-## RORC - rotation with carry to right
+## RORC - rotation with carry to right (C -> MSB, LSB -> C)
 :RORC reg0_4    is op0_8 = 0x7E; op4_4 = 0x4 & reg0_4 {
-    local lowbit:1 = reg0_4[0,1];
-    $(C_flag) = lowbit;
-    reg0_4 = reg0_4 >> 1;
-
-    if (lowbit == 0) goto <end>;
-    reg0_4[31,1] = 1;
-
-    <end>
+    local cin:4 = zext($(C_flag));
+    $(C_flag) = reg0_4[0,1];
+    reg0_4 = (reg0_4 >> 1) | (cin << 31);
     setResultFlags(reg0_4);
 }
 
@@ -1741,8 +1734,8 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 
 ### (2) RTSD src, Rd-Rd2
 :RTSD "#"^imm, reg4_4^"-"^reg0_4    is op0_8 = 0x3F; op4_4 > 0 & op0_4 >= op4_4 & op4_4 & op0_4 & reg4_4 & reg0_4 & popregs; imm8 [ imm = imm8 * 4; ] {
-    local n_regs = reg0_4 - reg4_4 + 1;
-    SP = SP + (imm - n_regs * 4);
+    # imm covers the saved registers too; release only the locals before popping Rd..Rd2
+    SP = SP + (imm - (op0_4 - op4_4 + 1) * 4);
 
     build popregs;
     pop32(PC);
@@ -1767,38 +1760,30 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 ## SBB - subtraction with borrow
 ### (1) SBB Rs, Rd
 :SBB reg4_4, reg0_4    is op0_8 = 0xFC; op0_8 = 0x03; reg4_4 & reg0_4 {
-    local tmp:4 = reg4_4 - zext(($(C_flag) == 0));
-    setSubtractFlags(reg0_4, tmp);
-    setSubtractOverflowFlags(reg0_4, tmp);
-    reg0_4 = reg0_4 - tmp;
-    setResultFlags(reg0_4);
+    subWithBorrow(reg0_4, reg4_4);
 }
 
 
 ### (2) SBB dsp[Rs], Rd
 :SBB ld_src, reg0_4    is op0_8 = 0x06; op2_6 = 0b101000 & ld0_2 < 3 & ld0_2; op0_8 = 0x00; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = 0x2; ] {
-    local tmp:4 = ld_src - zext(($(C_flag) == 0));
-    setSubtractFlags(reg0_4, tmp);
-    setSubtractOverflowFlags(reg0_4, tmp);
-    reg0_4 = reg0_4 - tmp;
-    setResultFlags(reg0_4);
+    subWithBorrow(reg0_4, ld_src);
 }
 
 
-## SCCnd - condition setting
+## SCCnd - condition setting: dest = Cnd ? 1 : 0 (always written; cc is a value, not a branch)
 ### (1.1) SCCnd.L Rd
-:SC^COND^szdsc szld_dst    is szdsc & op0_8 = 0xFC; op4_4 = 0xD & sz2_2 = 0b10 & sz2_2 & ld0_2 = 0b11 & ld0_2; (op0_4 & COND & cc) ... & szld_dst [ mode_ld = ld0_2; mode_sz = sz2_2; cc_val = op0_4; ] {
-    *:4 szld_dst = zext(cc);
+:SC^cc^".L" reg4_4    is op0_8 = 0xFC; op4_4 = 0xD & sz2_2 = 0b10 & ld0_2 = 0b11; (op0_4 & cc & reg4_4) [ cc_val = op0_4; ] {
+    reg4_4 = zext(cc);
 }
 
 ### (1.2) SCCnd.B/W/L dsp[Rd]
-:SC^COND^szdsc szld_dst    is szdsc & op0_8 = 0xFC; op4_4 = 0xD & sz2_2 = 0b00 & sz2_2 & ld0_2 != 0b11 & ld0_2; (op0_4 & COND & cc) ... & szld_dst [ mode_ld = ld0_2; mode_sz = sz2_2; cc_val = op0_4; ] {
+:SC^cc^szdsc szld_dst    is szdsc & op0_8 = 0xFC; op4_4 = 0xD & sz2_2 = 0b00 & sz2_2 & ld0_2 != 0b11 & ld0_2; (op0_4 & cc) ... & szld_dst [ mode_ld = ld0_2; mode_sz = sz2_2; cc_val = op0_4; ] {
     *:1 szld_dst = cc;
 }
-:SC^COND^szdsc szld_dst    is szdsc & op0_8 = 0xFC; op4_4 = 0xD & sz2_2 = 0b01 & sz2_2 & ld0_2 != 0b11 & ld0_2; (op0_4 & COND & cc) ... & szld_dst [ mode_ld = ld0_2; mode_sz = sz2_2; cc_val = op0_4; ] {
+:SC^cc^szdsc szld_dst    is szdsc & op0_8 = 0xFC; op4_4 = 0xD & sz2_2 = 0b01 & sz2_2 & ld0_2 != 0b11 & ld0_2; (op0_4 & cc) ... & szld_dst [ mode_ld = ld0_2; mode_sz = sz2_2; cc_val = op0_4; ] {
     *:2 szld_dst = zext(cc);
 }
-:SC^COND^szdsc szld_dst    is szdsc & op0_8 = 0xFC; op4_4 = 0xD & sz2_2 = 0b10 & sz2_2 & ld0_2 != 0b11 & ld0_2; (op0_4 & COND & cc) ... & szld_dst [ mode_ld = ld0_2; mode_sz = sz2_2; cc_val = op0_4; ] {
+:SC^cc^szdsc szld_dst    is szdsc & op0_8 = 0xFC; op4_4 = 0xD & sz2_2 = 0b10 & sz2_2 & ld0_2 != 0b11 & ld0_2; (op0_4 & cc) ... & szld_dst [ mode_ld = ld0_2; mode_sz = sz2_2; cc_val = op0_4; ] {
     *:4 szld_dst = zext(cc);
 }
 
@@ -1874,7 +1859,7 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
     local carrybit = (original >> (shift - 1)) & 1;
     reg0_4 = original s>> shift;
     $(C_flag) = carrybit:1;
-    setResultFlags(reg4_4);
+    setResultFlags(reg0_4);
     $(O_flag) = 0;
 }
 
@@ -1882,75 +1867,19 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 ## SHLL - logical and arithmetic shift to the left p. 187
 ### (1) SHLL #IMM:5, Rd
 :SHLL "#"^imm, reg0_4    is op1_7 = 0b110110 & op0_1; op4_4 & reg0_4 [ imm = (op0_1 << 4) + op4_4; ] {
-    local shift = imm:1;
-    local original = reg0_4;
-    local carrybit = (original >> (32 - shift)) & 1;
-    reg0_4 = original << shift;
-    $(C_flag) = carrybit:1;
-    setResultFlags(reg0_4);
-
-    # O flag is cleared if shift does not change sign (i.e. shifted out bits and result MSB are all the same)
-    # "when scr [sic] is 0, this flag is also cleared" - Assuming this is a typo of src
-    if (shift == 0) goto <unseto>;
-    local tmp:4 = original >> (32 - shift - 1);
-    if (tmp == 0) goto <unseto>;
-    if (tmp == ((1 << shift) - 1)) goto <unseto>;
-    goto <seto>;
-
-    <unseto>
-    $(O_flag) = 0;
-    goto <end>;
-    <seto>
-    $(O_flag) = 1;
-    <end>
+    local count:4 = imm;
+    shiftLeft(reg0_4, reg0_4, count);
 }
 
 ### (2) SHLL Rs, Rd
 :SHLL reg4_4, reg0_4    is op0_8 = 0xFD; op0_8 = 0x62; reg4_4 & reg0_4 {
-    local shift = reg4_4 & 31;
-    local original = reg0_4;
-    local carrybit = (original >> (32 - shift)) & 1;
-    reg0_4 = original << shift;
-    $(C_flag) = carrybit:1;
-    setResultFlags(reg0_4);
-
-    # "when scr [sic] is 0, this flag is also cleared" - Assuming this is a typo of src
-    if (shift == 0) goto <unseto>;
-    local tmp:4 = original >> (32 - shift - 1);
-    if (tmp == 0) goto <unseto>;
-    if (tmp == ((1 << shift) - 1)) goto <unseto>;
-    goto <seto>;
-
-    <unseto>
-    $(O_flag) = 0;
-    goto <end>;
-    <seto>
-    $(O_flag) = 1;
-    <end>
+    shiftLeft(reg0_4, reg0_4, reg4_4);
 }
 
 ### (3) SHLL #IMM:5, Rs, Rd
 :SHLL "#"^uimm0_5, reg4_4, reg0_4    is op0_8 = 0xFD; op5_3 = 0b110 & uimm0_5; reg4_4 & reg0_4 {
-    local shift = uimm0_5:1;
-    local original = reg4_4;
-    local carrybit = (original >> (32 - shift)) & 1;
-    reg0_4 = original << shift;
-    $(C_flag) = carrybit:1;
-    setResultFlags(reg0_4);
-
-    # "when scr [sic] is 0, this flag is also cleared" - Assuming this is a typo of src
-    if (shift == 0) goto <unseto>;
-    local tmp:4 = original >> (32 - shift - 1);
-    if (tmp == 0) goto <unseto>;
-    if (tmp == ((1 << shift) - 1)) goto <unseto>;
-    goto <seto>;
-
-    <unseto>
-    $(O_flag) = 0;
-    goto <end>;
-    <seto>
-    $(O_flag) = 1;
-    <end>
+    local count:4 = uimm0_5;
+    shiftLeft(reg0_4, reg4_4, count);
 }
 
 
@@ -2082,8 +2011,8 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
     reg0_4 = liop;
 }
 
-### (2) STNZ Rs, Rd
-:STNZ reg4_4, reg0_4    is op0_8 = 0xFC; op0_8 = 0x4B; reg4_4 & reg0_4 {
+### (2) STNZ Rs, Rd (RXv2; binutils: 1111 1100 0100 1111 rsrc rdst)
+:STNZ reg4_4, reg0_4    is op0_8 = 0xFC; op0_8 = 0x4F; reg4_4 & reg0_4 {
     if ($(Z_flag) == 1) goto inst_next;
     reg0_4 = reg4_4;
 }
@@ -2096,12 +2025,11 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
     reg0_4 = liop;
 }
 
-# TODO: This has the same encoding as STNZ 2 in the manual!
-### (2) STZ Rs, Rd
-#:STZ reg4_4, reg0_4    is op0_8 = 0xFC; op0_8 = 0x4B; reg4_4 & reg0_4 {
-#    if ($(Z_flag) == 0) goto inst_next;
-#    reg0_4 = reg4_4;
-#}
+### (2) STZ Rs, Rd (RXv2; binutils: 1111 1100 0100 1011 rsrc rdst)
+:STZ reg4_4, reg0_4    is op0_8 = 0xFC; op0_8 = 0x4B; reg4_4 & reg0_4 {
+    if ($(Z_flag) == 0) goto inst_next;
+    reg0_4 = reg4_4;
+}
 
 
 ## SUB - subtraction without borrow p. 195
@@ -2139,126 +2067,103 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 }
 
 
-## SUNTIL.size - search until equal string p. 196
-### SUNTIL.B
-:SUNTIL^szdsc    is szdsc & op0_8 = 0x7F; op2_6 = 0b100000 & sz0_2 = 0 & sz0_2 [ mode_sz = sz0_2; ] {
-    local tmp:4;
-    local check_len:1;
+## SUNTIL.size - search until equal string: while (R3 != 0) { tmp = *R1++; R3--; if (tmp == R2) break; }
+## C and Z from tmp - R2 of the last comparison (S, O unchanged); R3 == 0 on entry leaves registers and flags unchanged (RXv1 manual)
+:SUNTIL^".B"    is op0_8 = 0x7F; op2_6 = 0b100000 & sz0_2 = 0 {
+    local tmp:4 = 0;
+    if (R3 == 0) goto <end>;
     <loop>
-    check_len = (R3 == 0);
-    if (check_len) goto <end>;
         tmp = zext(*:1 R1);
         R1 = R1 + 1;
         R3 = R3 - 1;
-        if (tmp == R2) goto <end>;
-    goto <loop>;
+        if (tmp == R2) goto <done>;
+    if (R3 != 0) goto <loop>;
+    <done>
+    # only C and Z change (RXv1 manual flag table: S and O unchanged)
+    $(C_flag) = tmp >= R2;
+    $(Z_flag) = tmp == R2;
     <end>
 }
 
-### SUNTIL.W
-:SUNTIL^szdsc    is szdsc & op0_8 = 0x7F; op2_6 = 0b100000 & sz0_2 = 1 & sz0_2 [ mode_sz = sz0_2; ] {
-    local tmp:4;
-    local check_len:1;
+:SUNTIL^".W"    is op0_8 = 0x7F; op2_6 = 0b100000 & sz0_2 = 1 {
+    local tmp:4 = 0;
+    if (R3 == 0) goto <end>;
     <loop>
-    check_len = (R3 == 0);
-    if (check_len) goto <end>;
         tmp = zext(*:2 R1);
         R1 = R1 + 2;
         R3 = R3 - 1;
-        if (tmp == R2) goto <end>;
-    goto <loop>;
+        if (tmp == R2) goto <done>;
+    if (R3 != 0) goto <loop>;
+    <done>
+    # only C and Z change (RXv1 manual flag table: S and O unchanged)
+    $(C_flag) = tmp >= R2;
+    $(Z_flag) = tmp == R2;
     <end>
 }
 
-### SUNTIL.L
-:SUNTIL^szdsc    is szdsc & op0_8 = 0x7F; op2_6 = 0b100000 & sz0_2 = 2 & sz0_2 [ mode_sz = sz0_2; ] {
-    local tmp:4;
-    local check_len:1;
+:SUNTIL^".L"    is op0_8 = 0x7F; op2_6 = 0b100000 & sz0_2 = 2 {
+    local tmp:4 = 0;
+    if (R3 == 0) goto <end>;
     <loop>
-    check_len = (R3 == 0);
-    if (check_len) goto <end>;
         tmp = *:4 R1;
         R1 = R1 + 4;
         R3 = R3 - 1;
-        if (tmp == R2) goto <end>;
-    goto <loop>;
+        if (tmp == R2) goto <done>;
+    if (R3 != 0) goto <loop>;
+    <done>
+    # only C and Z change (RXv1 manual flag table: S and O unchanged)
+    $(C_flag) = tmp >= R2;
+    $(Z_flag) = tmp == R2;
     <end>
 }
 
 
-## SWHILE - search while unequal string p. 198
+## SWHILE.size - search while equal string: as SUNTIL but stops on the first tmp != R2
 :SWHILE^".B"    is op0_8 = 0x7F; op2_6 = 0b100001 & sz0_2 = 0 {
-    local check_len:1;
-    local tmp:4;
-
+    local tmp:4 = 0;
+    if (R3 == 0) goto <end>;
     <loop>
-    check_len = (R3 == 0);
-    if (check_len) goto <endloop>;
         tmp = zext(*:1 R1);
         R1 = R1 + 1;
         R3 = R3 - 1;
-        if (R1 != R2) goto <unmatch>;
-    goto <loop>;
-
-    <endloop>
-    $(Z_flag) = 1;
-    $(C_flag) = 1;
-    goto <end>;
-
-    <unmatch>
-    $(Z_flag) = 0;
-    $(C_flag) = ((tmp - R2) s>= 0);
-
+        if (tmp != R2) goto <done>;
+    if (R3 != 0) goto <loop>;
+    <done>
+    # only C and Z change (RXv1 manual flag table: S and O unchanged)
+    $(C_flag) = tmp >= R2;
+    $(Z_flag) = tmp == R2;
     <end>
 }
 
 :SWHILE^".W"    is op0_8 = 0x7F; op2_6 = 0b100001 & sz0_2 = 1 {
-    local check_len:1;
-    local tmp:4;
-
+    local tmp:4 = 0;
+    if (R3 == 0) goto <end>;
     <loop>
-    check_len = (R3 == 0);
-    if (check_len) goto <endloop>;
         tmp = zext(*:2 R1);
-        R1 = R1 + 1;
+        R1 = R1 + 2;
         R3 = R3 - 1;
-        if (R1 != R2) goto <unmatch>;
-    goto <loop>;
-
-    <endloop>
-    $(Z_flag) = 1;
-    $(C_flag) = 1;
-    goto <end>;
-
-    <unmatch>
-    $(Z_flag) = 0;
-    $(C_flag) = ((tmp - R2) s>= 0);
-
+        if (tmp != R2) goto <done>;
+    if (R3 != 0) goto <loop>;
+    <done>
+    # only C and Z change (RXv1 manual flag table: S and O unchanged)
+    $(C_flag) = tmp >= R2;
+    $(Z_flag) = tmp == R2;
     <end>
 }
 
 :SWHILE^".L"    is op0_8 = 0x7F; op2_6 = 0b100001 & sz0_2 = 2 {
-    local check_len:1;
-    local tmp:4;
-
+    local tmp:4 = 0;
+    if (R3 == 0) goto <end>;
     <loop>
-    check_len = (R3 == 0);
-    if (check_len) goto <endloop>;
         tmp = *:4 R1;
-        R1 = R1 + 1;
+        R1 = R1 + 4;
         R3 = R3 - 1;
-        if (R1 != R2) goto <unmatch>;
-    goto <loop>;
-
-    <endloop>
-    $(Z_flag) = 1;
-    $(C_flag) = 1;
-    goto <end>;
-
-    <unmatch>
-    $(Z_flag) = 0;
-    $(C_flag) = ((tmp - R2) s>= 0);
-
+        if (tmp != R2) goto <done>;
+    if (R3 != 0) goto <loop>;
+    <done>
+    # only C and Z change (RXv1 manual flag table: S and O unchanged)
+    $(C_flag) = tmp >= R2;
+    $(Z_flag) = tmp == R2;
     <end>
 }
 
@@ -2307,20 +2212,42 @@ popregs: is popr15 & popr14 & popr13 & popr12 & popr11 & popr10 & popr9 & popr8 
 }
 
 
-## XCHG - exchange values p. 204
-### when memex == UB or src == Rs
-#### XCHG Rs, Rd
+## XCHG - exchange values (memory forms: memory extended per memex into Rd, low bytes of Rd stored)
 :XCHG reg4_4, reg0_4    is op0_8 = 0xFC; op2_6 = 0b10000 & ld0_2 = 0b11; reg4_4 & reg0_4 {
     local tmp:4 = reg4_4;
     reg4_4 = reg0_4;
     reg0_4 = tmp;
 }
 
-#### XCHG dsp[Rs].UB, Rd
-:XCHG ld_src, reg0_4    is op0_8 = 0xFC; op2_6 = 0b10000 & ld0_2 < 0b11 & ld0_2; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = 4; ] unimpl
+# Address of a dsp[Rs].memex operand; the parent sets mode_ld and mode_mi
+xchg_mem: szlddsp^[reg4_4]^szdsc    is reg4_4 & szdsc; szlddsp    { local a:4 = reg4_4 + szlddsp; export a; }
+xchg_src: xchg_mem                  is xchg_mem [ mode_sz = mode_mi; ]  { export xchg_mem; }
 
-### when memex != UB
-:XCHG ld_src, reg0_4    is op0_8 = 0x06; mi6_2 & op2_4 = 0x8 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x10; reg0_4 ... & ld_src [ mode_ld = ld0_2; mode_mi = mi6_2; ] unimpl
+:XCHG xchg_src, reg0_4    is op0_8 = 0xFC; op2_6 = 0b10000 & ld0_2 < 0b11 & ld0_2; reg0_4 ... & xchg_src [ mode_ld = ld0_2; mode_mi = 4; ] {
+    local tmp:4 = zext(*:1 xchg_src);
+    *:1 xchg_src = reg0_4:1;
+    reg0_4 = tmp;
+}
+:XCHG xchg_src, reg0_4    is op0_8 = 0x06; mi6_2 = 0 & op2_4 = 0x8 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x10; reg0_4 ... & xchg_src [ mode_ld = ld0_2; mode_mi = 0; ] {
+    local tmp:4 = sext(*:1 xchg_src);
+    *:1 xchg_src = reg0_4:1;
+    reg0_4 = tmp;
+}
+:XCHG xchg_src, reg0_4    is op0_8 = 0x06; mi6_2 = 1 & op2_4 = 0x8 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x10; reg0_4 ... & xchg_src [ mode_ld = ld0_2; mode_mi = 1; ] {
+    local tmp:4 = sext(*:2 xchg_src);
+    *:2 xchg_src = reg0_4:2;
+    reg0_4 = tmp;
+}
+:XCHG xchg_src, reg0_4    is op0_8 = 0x06; mi6_2 = 2 & op2_4 = 0x8 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x10; reg0_4 ... & xchg_src [ mode_ld = ld0_2; mode_mi = 2; ] {
+    local tmp:4 = *:4 xchg_src;
+    *:4 xchg_src = reg0_4;
+    reg0_4 = tmp;
+}
+:XCHG xchg_src, reg0_4    is op0_8 = 0x06; mi6_2 = 3 & op2_4 = 0x8 & ld0_2 != 0b11 & ld0_2; op0_8 = 0x10; reg0_4 ... & xchg_src [ mode_ld = ld0_2; mode_mi = 3; ] {
+    local tmp:4 = zext(*:2 xchg_src);
+    *:2 xchg_src = reg0_4:2;
+    reg0_4 = tmp;
+}
 
 
 ## XOR p .301

@@ -1,0 +1,7 @@
+# MAX/MIN compare as signed values (RXv1 manual: "Maximum/Minimum of two signed integers")
+max_imm_signed | fd 74 4e ff    | R14=0xFFFFFFFE     | MAX #-0x1,R14     | R14=0xFFFFFFFF
+max_keep       | fd 74 4e ff    | R14=5              | MAX #-0x1,R14     | R14=5
+max_reg        | fc 13 21       | R1=5 R2=7          | MAX R2,R1         | R1=7
+min_signed     | fc 17 21       | R1=5 R2=0xFFFFFFFF | MIN R2,R1         | R1=0xFFFFFFFF
+min_keep       | fc 17 21       | R1=1 R2=9          | MIN R2,R1         | R1=1
+min_mem_l      | 06 a1 05 61 0c | R6=0x2000 R1=9 mem32[0x2030]=4 | MIN 0x30[R6].L,R1 | R1=4

@@ -1,0 +1,5 @@
+# sleigh specification file for RX62T Processor (big-endian data; instruction tokens are little-endian in rx62t.sinc)
+
+define endian=big;
+@include "rx62t_common.sinc"
+@include "rx62t.sinc"

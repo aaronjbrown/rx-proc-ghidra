@@ -1,0 +1,14 @@
+# Register-direct source of the "memex = UB" opcode forms is a full 32-bit register.
+# (Only memory operands are byte-extended.)
+cmp_reg_full | 47 f1    | R1=0x400 R15=0x404          | CMP R15,R1 | Z=0 C=0 S=1
+add_reg_full | 4b 21    | R1=0x100 R2=0x300           | ADD R2,R1  | R1=0x400
+and_reg_full | 53 21    | R1=0xFFFF0000 R2=0x12345678 | AND R2,R1  | R1=0x12340000
+mul_reg_full | 4f 21    | R1=2 R2=0x100               | MUL R2,R1  | R1=0x200
+utof_reg     | fc 57 21 | R2=3                        | UTOF R2,R1 | R1=0x40400000
+# controls: memory operands keep their memex size
+add_mem_l    | 06 88 21 | R2=0x2000 R1=1 mem32[0x2000]=0x100   | ADD [R2].L,R1     | R1=0x101
+cmp_mem_ub   | 45 21 04 | R2=0x2000 R1=0x80 mem8[0x2004]=0x80  | CMP 0x4[R2].UB,R1 | Z=1
+# controls: MOVU.B/W Rs,Rd shares the source table and must still zero-extend
+movu_b_reg   | 5b 21    | R2=0x12345678               | MOVU.B R2,R1 | R1=0x78
+movu_w_reg   | 5f 21    | R2=0x12345678               | MOVU.W R2,R1 | R1=0x5678
+mov_b_reg    | cf 21    | R2=0x000000F0               | MOV.B R2,R1  | R1=0xFFFFFFF0

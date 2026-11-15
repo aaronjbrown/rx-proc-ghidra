@@ -1,0 +1,7 @@
+# SUNTIL/SWHILE: search until equal / while equal; R1 steps by the size; only C and Z change
+swhile_b    | 7f 84    | R1=0x2000 R2=0x41 R3=4 mem8[0x2000]=0x41 mem8[0x2001]=0x41 mem8[0x2002]=0x42 | SWHILE.B | R1=0x2003 R3=1 Z=0 C=1
+swhile_w    | 7f 85    | R1=0x2000 R2=0 R3=2 | SWHILE.W | R1=0x2004 R3=0 Z=1
+suntil_b    | 7f 80    | R1=0x2000 R2=0x42 R3=4 mem8[0x2000]=0x41 mem8[0x2001]=0x41 mem8[0x2002]=0x42 | SUNTIL.B | R1=0x2003 R3=1 Z=1 C=1
+suntil_none | 7f 80    | R1=0x2000 R2=0x42 R3=2 mem8[0x2000]=0x41 mem8[0x2001]=0x41 | SUNTIL.B | R1=0x2002 R3=0 Z=0 C=0
+suntil_so   | 7f 80    | R1=0x2000 R2=0x42 R3=1 S=0 O=1 mem8[0x2000]=0x41 | SUNTIL.B | Z=0 C=0 S=0 O=1
+swhile_so   | 7f 84    | R1=0x2000 R2=0x42 R3=1 S=1 O=0 mem8[0x2000]=0x43 | SWHILE.B | Z=0 C=1 S=1 O=0

@@ -14,4 +14,16 @@
     <description>RX62T/RXv2 Language Module</description>
     <compiler name="default" spec="rx62t.cspec" id="default"/>
   </language>
+  <language processor="RX62T"
+            endian="big"
+            instructionEndian="little"
+            size="32"
+            variant="default"
+            version="1.0"
+            slafile="rx62t_be.sla"
+            processorspec="rx62t.pspec"
+            id="rx62t:BE:32:default">
+    <description>RX62T/RXv2 big-endian data (instructions in fetch order, little-endian)</description>
+    <compiler name="default" spec="rx62t.cspec" id="default"/>
+  </language>
 </language_definitions>

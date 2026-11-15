@@ -1,0 +1,8 @@
+# Bit ops with a register bit number on a memory destination operate on a byte, bit = Rs & 7
+# (binutils: BWL(BSIZE)). Register destinations use bit = Rs & 31.
+bset_reg_mem | fc 60 12 | R1=0x2000 R2=9 | - | mem8[0x2000]=0x02 mem8[0x2001]=0
+bclr_reg_mem | fc 64 12 | R1=0x2000 R2=9 mem32[0x2000]=0xFFFFFFFF | - | mem8[0x2000]=0xFD mem8[0x2001]=0xFF
+bnot_reg_mem | fc 6c 12 | R1=0x2000 R2=0 | - | mem8[0x2000]=0x01
+btst_reg_mem | fc 68 12 | R1=0x2000 R2=9 mem8[0x2000]=0x02 | - | C=1 Z=0
+bnot_reg_reg | fc 6f 12 | R1=0 R2=4      | BNOT R2,R1 | R1=0x10
+bset_imm_mem | f0 10    | R1=0x2000      | - | mem8[0x2000]=0x01

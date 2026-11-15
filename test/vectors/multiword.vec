@@ -1,0 +1,15 @@
+# ADC: dest = dest + src + C ; SBB: dest = dest - src - !C (RXv1 manual)
+# ROLC/RORC rotate dest and C as a 33-bit unit.
+adc_old_carry | fc 0b 42    | R2=1 R4=1 C=1          | ADC R4,R2   | R2=3 C=0 Z=0 O=0
+adc_carry_out | fc 0b 42    | R2=0xFFFFFFFF R4=0 C=1 | ADC R4,R2   | R2=0 C=1 Z=1 O=0
+adc_overflow  | fc 0b 42    | R2=0x7FFFFFFF R4=0 C=1 | ADC R4,R2   | R2=0x80000000 O=1 S=1 C=0
+adc_imm       | fd 74 22 01 | R2=1 C=1               | ADC #0x1,R2 | R2=3
+adc_mem       | 06 a0 02 42 | R4=0x2000 R2=1 C=1 mem32[0x2000]=1 | ADC [R4].L,R2 | R2=3
+sbb_borrow_in | fc 03 42    | R2=5 R4=2 C=0          | SBB R4,R2   | R2=2 C=1
+sbb_no_borrow | fc 03 42    | R2=5 R4=2 C=1          | SBB R4,R2   | R2=3 C=1
+sbb_underflow | fc 03 42    | R2=0 R4=0 C=0          | SBB R4,R2   | R2=0xFFFFFFFF C=0 S=1
+sbb_overflow  | fc 03 42    | R2=0x80000000 R4=0 C=0 | SBB R4,R2   | R2=0x7FFFFFFF O=1 C=1
+rolc_in       | 7e 54       | R4=1 C=1               | ROLC R4     | R4=3 C=0
+rolc_out      | 7e 54       | R4=0x80000000 C=0      | ROLC R4     | R4=0 C=1 Z=1
+rorc_in       | 7e 42       | R2=2 C=1               | RORC R2     | R2=0x80000001 C=0 S=1
+rorc_out      | 7e 42       | R2=1 C=0               | RORC R2     | R2=0 C=1 Z=1

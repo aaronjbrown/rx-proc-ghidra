@@ -1,0 +1,6 @@
+# SCCnd: dest = Cnd ? 1 : 0, always written; SCCnd.L Rd writes the register
+sceq_l_true  | fc db e0    | Z=1 R14=0x2000  | SCEQ.L R14   | R14=1 nostore
+sceq_l_false | fc db e0    | Z=0 R14=0x2000  | SCEQ.L R14   | R14=0 nostore
+scne_l_reg   | fc db e1    | Z=1 R14=5       | SCNE.L R14   | R14=0 nostore
+sceq_b_mem   | fc d0 e0    | Z=1 R14=0x2000  | -            | mem8[0x2000]=1
+sceq_b_mem_0 | fc d0 e0    | Z=0 R14=0x2000 mem8[0x2000]=0x55 | - | mem8[0x2000]=0

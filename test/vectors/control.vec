@@ -1,0 +1,9 @@
+# Control vectors: behaviour that was already correct before the gap fixes.
+# Format: name | hex bytes | setup | expected disassembly ('-' = skip) | expectations | langs (both|le|be)
+mov_l_imm32 | fb 12 78 56 34 12 |      | MOV.L #0x12345678,R1 | R1=0x12345678
+add_uimm4   | 62 51             | R1=1 | ADD #0x5,R1          | R1=6 C=0 Z=0 S=0
+cmp_eq      | 61 01             | R1=0 | CMP #0x0,R1          | Z=1 C=1
+bra_w       | 38 10 00          |      | -                    | PC=@+0x10
+bra_a       | 04 00 01 00       |      | -                    | PC=@+0x100
+# MOV.L dsp:16[R2],R1 ; dsp field 0x0800 * 4 = 0x2000
+mov_dsp16   | ee 21 00 08       | R2=0 mem32[0x2000]=0x55667788 | - | R1=0x55667788
