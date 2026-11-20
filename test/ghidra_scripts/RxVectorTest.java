@@ -1,6 +1,6 @@
 // Headless test harness for the RX SLEIGH specification.
 // For every vector: write the bytes into the scratch program, disassemble, compare the
-// listing text, single-step the instruction in EmulatorHelper and check registers,
+// listing text, single-step the instruction in a PcodeEmulator and check registers,
 // flags and memory. Results are printed as "RXTEST PASS|FAIL <lang> <file>:<name> ...".
 // Usage: -postScript RxVectorTest.java <vector file> [<vector file> ...]
 //
@@ -13,9 +13,21 @@
 // Memory: the scratch image is 64 KiB of zeros at 0. Vectors use 0x2000-0x3FFF for data; code slots
 // start at 0x4000 (0x20 bytes each), so a run holds at most 1536 vectors per language.
 //@category Test
-import ghidra.app.emulator.EmulatorHelper;
 import ghidra.app.script.GhidraScript;
+import ghidra.pcode.emu.PcodeEmulationCallbacks;
+import ghidra.pcode.emu.PcodeEmulator;
+import ghidra.pcode.emu.PcodeThread;
+import ghidra.pcode.exec.PcodeArithmetic;
+import ghidra.pcode.exec.PcodeArithmetic.Purpose;
+import ghidra.pcode.exec.PcodeExecutionException;
+import ghidra.pcode.exec.PcodeExecutorState;
+import ghidra.pcode.exec.PcodeExecutorStatePiece;
+import ghidra.pcode.exec.PcodeExecutorStatePiece.Reason;
 import ghidra.program.model.address.Address;
+import ghidra.program.model.address.AddressRange;
+import ghidra.program.model.address.AddressSet;
+import ghidra.program.model.lang.Register;
+import ghidra.program.model.mem.MemoryBlock;
 import ghidra.program.model.listing.Instruction;
 import ghidra.program.model.pcode.PcodeOp;
 import java.io.BufferedReader;
@@ -159,21 +171,80 @@ public class RxVectorTest extends GhidraScript {
             }
             return null;
         }
-        EmulatorHelper emu = new EmulatorHelper(currentProgram);
+        Emu emu = new Emu(addr);
+        for (String kv : tokens(v[2])) apply(emu, kv);
+        emu.writes.enabled = true;              // only the stepped instruction's writes count
         try {
-            for (String kv : tokens(v[2])) apply(emu, kv);
-            emu.writeRegister(emu.getPCRegister(), BigInteger.valueOf(addrOff));
-            emu.enableMemoryWriteTracking(true);
-            if (!emu.step(monitor)) return "emulation failed: " + emu.getLastError();
-            StringBuilder errs = new StringBuilder();
-            for (String kv : tokens(v[4])) {
-                String e = check(emu, insn, kv, addrOff);
-                if (e != null) errs.append(e).append("; ");
-            }
-            return errs.length() == 0 ? null : errs.toString() + "[" + insn + "]";
+            emu.thread.stepInstruction();
         }
-        finally {
-            emu.dispose();
+        catch (PcodeExecutionException e) {
+            return "emulation failed: " + e.getMessage();
+        }
+        emu.writes.enabled = false;
+        StringBuilder errs = new StringBuilder();
+        for (String kv : tokens(v[4])) {
+            String e = check(emu, insn, kv, addrOff);
+            if (e != null) errs.append(e).append("; ");
+        }
+        return errs.length() == 0 ? null : errs.toString() + "[" + insn + "]";
+    }
+
+    /** Records every range written to a loaded memory space (ram) while enabled; register,
+     *  unique and other non-loaded spaces are ignored, as EmulatorHelper's write tracking did. */
+    private static final class WriteTracker implements PcodeEmulationCallbacks<byte[]> {
+        final AddressSet written = new AddressSet();
+        boolean enabled;
+
+        @Override
+        public <A, U> void dataWritten(PcodeThread<byte[]> thread, PcodeExecutorStatePiece<A, U> piece,
+                Address address, int length, U value) {
+            if (enabled && length > 0 && address.getAddressSpace().isLoadedMemorySpace())
+                written.add(address, address.add(length - 1));
+        }
+    }
+
+    /** A fresh PcodeEmulator per vector: the scratch program's initialized bytes are copied into the
+     *  shared state, and one thread starts at the vector's address with the program's context there. */
+    private final class Emu {
+        final WriteTracker writes = new WriteTracker();
+        final PcodeEmulator machine = new PcodeEmulator(currentProgram.getLanguage(), writes);
+        final PcodeThread<byte[]> thread = machine.newThread();
+        final PcodeArithmetic<byte[]> arith = machine.getArithmetic();
+        final PcodeExecutorState<byte[]> mem = machine.getSharedState();
+
+        Emu(Address pc) throws Exception {
+            for (MemoryBlock b : currentProgram.getMemory().getBlocks()) {
+                if (!b.isInitialized() || !b.getStart().getAddressSpace().isLoadedMemorySpace()) continue;
+                byte[] bytes = new byte[(int) b.getSize()];
+                b.getBytes(b.getStart(), bytes);
+                mem.setVar(b.getStart(), bytes.length, false, bytes);
+            }
+            thread.overrideCounter(pc);
+            thread.overrideContext(currentProgram.getProgramContext().getDisassemblyContext(pc));
+        }
+
+        Register reg(String name) {
+            Register r = currentProgram.getLanguage().getRegister(name);
+            if (r == null) throw new IllegalArgumentException("unknown register " + name);
+            return r;
+        }
+
+        long readRegister(String name) {
+            return arith.toBigInteger(thread.getState().getVar(reg(name), Reason.INSPECT), Purpose.INSPECT).longValue();
+        }
+
+        void writeRegister(String name, long value) {
+            Register r = reg(name);
+            thread.getState().setVar(r, arith.fromConst(BigInteger.valueOf(value), r.getMinimumByteSize()));
+        }
+
+        /** Raw bytes as stored (program byte order). */
+        byte[] readMemory(Address a, int n) {
+            return mem.getVar(a, n, false, Reason.INSPECT);
+        }
+
+        void writeMemory(Address a, byte[] b) {
+            mem.setVar(a, b.length, false, b);
         }
     }
 
@@ -224,15 +295,15 @@ public class RxVectorTest extends GhidraScript {
         return v;
     }
 
-    private void apply(EmulatorHelper emu, String kv) {
+    private void apply(Emu emu, String kv) {
         String[] p = kv.split("=", 2);
         String key = p[0];
         long value = num(p[1]);
         int fb = flagBit(key);
         if (fb >= 0) {
-            long psw = emu.readRegister("PSW").longValue();
+            long psw = emu.readRegister("PSW");
             psw = value != 0 ? psw | (1L << fb) : psw & ~(1L << fb);
-            emu.writeRegister("PSW", BigInteger.valueOf(psw));
+            emu.writeRegister("PSW", psw);
         }
         else if (key.startsWith("mem")) {
             int bits = Integer.parseInt(key.substring(3, key.indexOf('[')));
@@ -240,15 +311,14 @@ public class RxVectorTest extends GhidraScript {
             emu.writeMemory(toAddr(a), memBytes(bits, value));
         }
         else {
-            emu.writeRegister(key, BigInteger.valueOf(value & 0xFFFFFFFFL));
+            emu.writeRegister(key, value & 0xFFFFFFFFL);
         }
     }
 
-    private String check(EmulatorHelper emu, Instruction insn, String kv, long base) throws Exception {
+    private String check(Emu emu, Instruction insn, String kv, long base) throws Exception {
         if (kv.equals("nostore")) {
             StringBuilder written = new StringBuilder();
-            for (ghidra.program.model.address.AddressRange r : emu.getTrackedMemoryWriteSet())
-                if (r.getAddressSpace().isLoadedMemorySpace()) written.append(r).append(' ');
+            for (AddressRange r : emu.writes.written) written.append(r).append(' ');
             return written.length() == 0 ? null : "memory written at " + written.toString().trim();
         }
         if (kv.equals("nobranch")) {
@@ -265,11 +335,11 @@ public class RxVectorTest extends GhidraScript {
         long got;
         if (key.equals("PC")) {
             want = p[1].startsWith("@") ? base + num(p[1].substring(1).replace("+", "")) : num(p[1]);
-            got = emu.getExecutionAddress().getOffset();
+            got = emu.thread.getCounter().getOffset();
         }
         else if (flagBit(key) >= 0) {
             want = num(p[1]);
-            got = (emu.readRegister("PSW").longValue() >> flagBit(key)) & 1;
+            got = (emu.readRegister("PSW") >> flagBit(key)) & 1;
         }
         else if (key.startsWith("mem")) {
             int bits = Integer.parseInt(key.substring(3, key.indexOf('[')));
@@ -279,7 +349,7 @@ public class RxVectorTest extends GhidraScript {
         }
         else {
             want = num(p[1]) & 0xFFFFFFFFL;
-            got = emu.readRegister(key).longValue() & 0xFFFFFFFFL;
+            got = emu.readRegister(key) & 0xFFFFFFFFL;
         }
         if ((want & 0xFFFFFFFFL) == (got & 0xFFFFFFFFL)) return null;
         return key + "=0x" + Long.toHexString(got) + " (want 0x" + Long.toHexString(want) + ")";

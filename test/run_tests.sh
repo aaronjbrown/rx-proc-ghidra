@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Compile the SLEIGH languages of this extension into a private staging copy and run the
 # p-code vector suite (test/vectors/*.vec) headlessly under every language id in rx62t.ldefs.
+# The loader/analyzer jar is built from src/main/java into the staged extension, and the test sources
+# (src/test/java) into lib/RX62T-tests.jar of that staged copy only (never installed or released); with
+# no vector-file arguments the loader suite (test/ghidra_scripts/RxLoaderTest.java) runs as well.
 # The user's installed extension is never touched: Ghidra runs with
 # -Dapplication.settingsdir pointing at the staging directory.
 #
@@ -56,6 +59,16 @@ mkdir -p "$EXT/data/languages" "$STAGE/proj"
 cp "$REPO"/data/languages/*.{ldefs,pspec,cspec,opinion,slaspec,sinc} "$EXT/data/languages/"
 cp "$REPO/Module.manifest" "$EXT/"
 printf 'name=RX62T\ndescription=RX62T test staging\nauthor=test\ncreatedOn=\nversion=%s\n' "$GHIDRA_VERSION" > "$EXT/extension.properties"
+# shellcheck source=../tools/java_env.sh
+. "$REPO/tools/java_env.sh"
+build_jar "$REPO" "$EXT/lib/RX62T.jar" || die "jar build failed"
+# test fixtures (rx62t.RealisticImage) for RxLoaderTest; only in this staged extension
+tests_tmp="$EXT/lib/RX62T-tests.classes"
+rm -rf "$tests_tmp"; mkdir -p "$tests_tmp"
+jdk javac --release "$(_java_release)" -proc:none -nowarn -cp "$EXT/lib/RX62T.jar:$(ghidra_classpath)" \
+    -d "$tests_tmp" "$REPO"/src/test/java/rx62t/*.java || die "test jar compile failed"
+jdk jar --create --file "$EXT/lib/RX62T-tests.jar" -C "$tests_tmp" . || die "test jar build failed"
+rm -rf "$tests_tmp"
 
 for spec in "$EXT"/data/languages/*.slaspec; do
     if ! run_ghidra sleigh "$spec" "${spec%.slaspec}.sla" > "$STAGE/sleigh-$(basename "$spec").log" 2>&1; then
@@ -68,6 +81,19 @@ head -c 65536 /dev/zero > "$STAGE/zero.bin"
 mapfile -t IDS < <(grep -oE 'id="[^"]+"' "$REPO/data/languages/rx62t.ldefs" | grep -v 'id="default"' | sed -E 's/id="(.*)"/\1/')
 
 total_fail=0; total_pass=0; n=0
+# tally <label> <log>: print the log's RXTEST FAIL/SKIP/SUMMARY lines and add its summary to the totals
+tally() {
+    local label="$1" log="$2" summary p f
+    grep -oE 'RXTEST (FAIL|SKIP|SUMMARY).*' "$log" | sed "s/^/[$label] /" || true
+    summary=$(grep -oE 'RXTEST SUMMARY [a-z]+ pass=[0-9]+ fail=[0-9]+' "$log" | tail -1 || true)
+    if [ -z "$summary" ]; then
+        echo "[$label] NO SUMMARY - language failed to load or script crashed (see $log)"
+        grep -E 'ERROR|Exception' "$log" | head -10
+        total_fail=$((total_fail + 1)); return
+    fi
+    p=$(sed -E 's/.*pass=([0-9]+).*/\1/' <<<"$summary"); f=$(sed -E 's/.*fail=([0-9]+).*/\1/' <<<"$summary")
+    total_pass=$((total_pass + p)); total_fail=$((total_fail + f))
+}
 for id in "${IDS[@]}"; do
     n=$((n + 1))
     log="$STAGE/run-$n.log"
@@ -75,16 +101,18 @@ for id in "${IDS[@]}"; do
         -import "$STAGE/zero.bin" -loader BinaryLoader -loader-baseAddr 0 -processor "$id" \
         -noanalysis -deleteProject -scriptPath "$REPO/test/ghidra_scripts" \
         -postScript RxVectorTest.java "${VECTORS[@]}" > "$log" 2>&1 || true
-    grep -oE 'RXTEST (FAIL|SUMMARY).*' "$log" | sed "s/^/[$id] /" || true
-    summary=$(grep -oE 'RXTEST SUMMARY [a-z]+ pass=[0-9]+ fail=[0-9]+' "$log" | tail -1 || true)
-    if [ -z "$summary" ]; then
-        echo "[$id] NO SUMMARY - language failed to load or script crashed (see $log)"
-        grep -E 'ERROR|Exception' "$log" | head -10
-        total_fail=$((total_fail + 1)); continue
-    fi
-    p=$(sed -E 's/.*pass=([0-9]+).*/\1/' <<<"$summary"); f=$(sed -E 's/.*fail=([0-9]+).*/\1/' <<<"$summary")
-    total_pass=$((total_pass + p)); total_fail=$((total_fail + f))
+    tally "$id" "$log"
 done
+
+if [ $# -eq 0 ]; then
+    # the loader suite loads its own images in-process; zero.bin is only the script's host program
+    log="$STAGE/run-loader.log"
+    run_ghidra analyzeHeadless "$STAGE/proj" "ploader" \
+        -import "$STAGE/zero.bin" -loader BinaryLoader -loader-baseAddr 0 -processor "${IDS[0]}" \
+        -noanalysis -deleteProject -scriptPath "$REPO/test/ghidra_scripts;$REPO/ghidra_scripts" \
+        -postScript RxLoaderTest.java > "$log" 2>&1 || true
+    tally loader "$log"
+fi
 
 echo "RXTEST TOTAL pass=$total_pass fail=$total_fail (languages: ${IDS[*]})"
 [ "$total_fail" -eq 0 ]

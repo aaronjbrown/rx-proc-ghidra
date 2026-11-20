@@ -1,6 +1,7 @@
 build/
 dist/
 data/languages/*.sla
+lib/*.jar
 
 .gradle/
 

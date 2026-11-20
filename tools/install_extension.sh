@@ -3,8 +3,13 @@
 # Ghidra extension, compiling the .sla files with Ghidra's own SLEIGH compiler. Use it to try
 # source changes without building a release zip. Quit Ghidra before running it.
 #
-# The current data/languages directory is backed up first, to $BACKUP_ROOT, never inside the
-# extension. If a SLEIGH compile fails, the backup is restored.
+# It also builds the RX62T Raw Binary loader and the analyzer from src/main/java into the
+# extension's lib/RX62T.jar (the jar is built locally only; it is not in the release zip), and
+# copies the RX scripts from ghidra_scripts/ into the extension's ghidra_scripts/.
+#
+# The current data/languages directory, lib/RX62T.jar and ghidra_scripts/ (if any) are backed up
+# first, to $BACKUP_ROOT, never inside the extension. If the jar build or a SLEIGH compile fails,
+# all three are restored (a jar or scripts directory that did not exist before is removed again).
 #
 # usage: tools/install_extension.sh [--native|--flatpak] [<checkout>]
 #        <checkout> defaults to the repository containing this script.
@@ -22,7 +27,7 @@ MODE=
 case "${1:-}" in
     --native) MODE=native; shift ;;
     --flatpak) MODE=flatpak; shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0 ;;
     -*) die "unknown option: $1" ;;
 esac
 [ -n "$MODE" ] || { [ -n "${GHIDRA_INSTALL_DIR:-}" ] && MODE=native || MODE=flatpak; }
@@ -31,6 +36,7 @@ SRC="${1:-$(dirname "$0")/..}"
 [ -d "$SRC" ] || die "no such directory: $SRC"
 SRC="$(cd "$SRC" && pwd)"
 [ -f "$SRC/data/languages/rx62t.ldefs" ] || die "not an rx-proc-ghidra checkout: $SRC"
+[ -f "$SRC/ghidra_scripts/README.txt" ] || die "no ghidra_scripts/README.txt in the checkout: $SRC"
 
 GHIDRA_VERSION="${GHIDRA_VERSION:-12.1.3}"
 GHIDRA_FLATPAK="${GHIDRA_FLATPAK:-org.ghidra_sre.Ghidra}"
@@ -69,16 +75,65 @@ backup="$BACKUP_ROOT/$(basename "$EXT")-languages.backup-$(date +%Y%m%d-%H%M%S)"
 [ -e "$backup" ] && backup="$backup-$$"
 cp -a "$LANG_DIR" "$backup"
 echo "backed up $LANG_DIR -> $backup"
+JAR="$EXT/lib/RX62T.jar"
+jar_backup=
+if [ -e "$JAR" ]; then
+    jar_backup="$BACKUP_ROOT/$(basename "$EXT")-jar.backup-${backup##*backup-}"
+    cp -a "$JAR" "$jar_backup"
+    echo "backed up $JAR -> $jar_backup"
+fi
+SCRIPTS="$EXT/ghidra_scripts"
+scripts_backup=
+if [ -e "$SCRIPTS" ]; then
+    scripts_backup="$BACKUP_ROOT/$(basename "$EXT")-scripts.backup-${backup##*backup-}"
+    cp -a "$SCRIPTS" "$scripts_backup"
+    echo "backed up $SCRIPTS -> $scripts_backup"
+fi
+
+# Build the jar outside the extension first (the Flatpak needs a $HOME path without '.'-prefixed
+# elements, which EXT usually has), so a compile error leaves the installed extension untouched.
+# RX_BUILD_JAR_CMD "<checkout> <jar>" replaces build_jar (used by the self-test).
+jarbuild="$(mktemp -d "$BACKUP_ROOT/jar-build.XXXXXX")"
+if [ -n "${RX_BUILD_JAR_CMD:-}" ]; then
+    "$RX_BUILD_JAR_CMD" "$SRC" "$jarbuild/RX62T.jar" || { rm -rf "$jarbuild"; die "jar build failed"; }
+else
+    # java_env.sh builds natively when GHIDRA_INSTALL_DIR is set; with --flatpak, build with the
+    # Flatpak JDK against the Flatpak Ghidra that will load the jar.
+    [ "$MODE" = flatpak ] && unset GHIDRA_INSTALL_DIR
+    . "$(dirname "$0")/java_env.sh" || { rm -rf "$jarbuild"; die "cannot set up the Java environment"; }
+    build_jar "$SRC" "$jarbuild/RX62T.jar" || { rm -rf "$jarbuild"; die "jar build failed (the extension was not changed)"; }
+fi
+[ -s "$jarbuild/RX62T.jar" ] || { rm -rf "$jarbuild"; die "jar build produced no jar"; }
 
 done_ok=
+# Languages first, then the jar, then the scripts; each step reports its own failure and never
+# stops the others (the && / || chains keep errexit from ending the trap early).
 restore() {
     [ -n "$done_ok" ] && return
     rm -rf "$LANG_DIR" && cp -a "$backup" "$LANG_DIR" \
         && echo "install failed; restored $LANG_DIR from $backup" >&2 \
         || echo "install failed and the restore failed too; restore by hand from $backup" >&2
+    if [ -n "$jar_backup" ]; then
+        cp -a "$jar_backup" "$JAR" && echo "restored $JAR from $jar_backup" >&2 \
+            || echo "could not restore $JAR; copy it back by hand from $jar_backup" >&2
+    else
+        rm -f "$JAR" || echo "could not remove the new $JAR; delete it by hand" >&2
+    fi
+    if [ -n "$scripts_backup" ]; then
+        rm -rf "$SCRIPTS" && cp -a "$scripts_backup" "$SCRIPTS" \
+            && echo "restored $SCRIPTS from $scripts_backup" >&2 \
+            || echo "could not restore $SCRIPTS; copy it back by hand from $scripts_backup" >&2
+    else
+        rm -rf "$SCRIPTS" || echo "could not remove the new $SCRIPTS; delete it by hand" >&2
+    fi
 }
 trap restore EXIT
 
+mkdir -p "$EXT/lib"
+cp "$jarbuild/RX62T.jar" "$JAR"
+rm -rf "$jarbuild"
+mkdir -p "$SCRIPTS"
+cp "$SRC"/ghidra_scripts/*.java "$SRC/ghidra_scripts/README.txt" "$SCRIPTS/"
 rm -f "$LANG_DIR"/*.sla
 cp "$SRC"/data/languages/*.{ldefs,pspec,cspec,opinion,slaspec,sinc} "$LANG_DIR/"
 logdir="$(mktemp -d "$BACKUP_ROOT/sleigh-log.XXXXXX")"
@@ -94,6 +149,6 @@ rm -rf "$logdir"
 
 { echo "source: $SRC"; git -C "$SRC" log -1 --format='commit: %h %s (%cd)' 2> /dev/null || true; date; } > "$EXT/INSTALLED_FROM.txt"
 done_ok=1
-ls "$LANG_DIR"/*.sla
+ls "$LANG_DIR"/*.sla "$JAR" "$SCRIPTS"/*.java
 echo "installed. Languages: $(grep -oE 'id="rx62t:[^"]+"' "$LANG_DIR/rx62t.ldefs" | tr '\n' ' ')"
 echo "Restart Ghidra to load them."

@@ -20,14 +20,60 @@ R6–R13 preserved, caller removes stack arguments).
 
 When an RX runs in big-endian mode, data in memory is big-endian, but the CPU still fetches
 instructions as little-endian 32-bit words. In a raw big-endian flash image the code is therefore
-byte-reversed within each aligned 32-bit word. To analyse such an image:
+byte-reversed within each aligned 32-bit word. The language `rx62t:BE:32:default` expects the code
+in fetch order: instructions then decode exactly as in the LE language, and multi-byte data
+(constant tables, vector tables, mixed-width accesses to RAM) reads big-endian.
 
-1. Un-swap the 32-bit words of the **code** regions only (leave constant data, strings and vector
-   tables untouched), so the instruction stream is in fetch order.
-2. Import with `rx62t:BE:32:default`. Instructions decode exactly as in the LE language, and
-   multi-byte data (constant tables, vector tables, mixed-width accesses to RAM) reads big-endian.
+The *RX62T Raw Binary* loader does the un-swapping. To import a raw big-endian RX flash image, you
+need the image and its base address (the address its first byte is mapped to):
 
-Which regions are code is image-specific, so it is not done by this module.
+1. In *File → Import File*, pick the file, set *Format* to **RX62T Raw Binary** and *Language* to
+   `rx62t:BE:32:default`.
+2. Under *Options…*, set *Base address* to the image's base address (for example `0xFFF80000`).
+   *Add RX RAM and peripheral I/O blocks* is on by default (see below).
+3. Run auto-analysis.
+
+When the file starts with reset code that sets INTB or EXTB, the import dialog preselects the
+language whose byte order makes that code decode; otherwise neither language is preselected.
+
+With *Add RX RAM and peripheral I/O blocks* on (headless: `-loader-rxMemoryMap true|false`), the
+loader also adds two uninitialized read/write blocks from the RX62T memory map, so references to
+RAM and I/O registers resolve:
+
+| Block | Range | Notes |
+|-------|-------|-------|
+| `RAM` | `0x00000000`–`0x0007FFFF` | the on-chip RAM area; how much of it is populated varies by chip (see the memory map in the RX62T datasheet) |
+| `PERIPH` | `0x00080000`–`0x000FFFFF` | peripheral I/O registers, marked volatile |
+
+A block that would overlap the image (or any other existing block) is skipped whole, and the import
+log says so.
+
+The loader also turns on the *Decompiler Parameter ID* analyzer for the program (Ghidra enables it
+by default only for PE files), which gives better function signatures. Programs from other loaders
+(ELF, *Raw Binary*) are left as Ghidra sets them: enable it by hand in the auto-analysis options, or
+headless in a pre-script.
+
+With *File → Add To Program*, the loader adds only the image: *Add RX RAM and peripheral I/O blocks*
+defaults to off there, and the program's *Decompiler Parameter ID* setting is left unchanged.
+
+The loader decides which 32-bit words are code with a statistical code/data model (a byte-pair model
+of code trained on the image itself, smoothed into long sections) and un-swaps only those. Constant
+data, strings and the fixed vector table at `0xFFFFFF80` stay as stored. The original file bytes
+are kept in the program. The loader adds the entry point `reset`. It is read from the reset vector
+at `0xFFFFFFFC` if the image covers it and the vector points into the image. Otherwise it is the
+image base.
+
+The *RX62T Platform Setup* analyzer runs during auto-analysis. It makes a function at `reset`. It
+reads INTB and EXTB from the reset code, lays them down as labelled pointer arrays and makes
+functions at their handlers. It also types the other in-image pointer tables, skipping any that
+overlap code or defined data. It reads memory as loaded, so it gives the same result for an image
+already in fetch order (un-swapped beforehand) imported with Ghidra's own *Raw Binary* loader. For a
+little-endian image, use the *RX62T Raw Binary* loader with `rx62t:LE:32:default`: it loads the
+file verbatim.
+
+The loader and the analyzer are only in an extension installed from a checkout (see
+[From source](#from-source)). The release zip holds the language files and `ghidra_scripts/`, but
+no loader jar.
 
 ## Install
 
@@ -44,8 +90,8 @@ If an older RX62T is listed, uninstall it and restart Ghidra first.
 
 To build the zip yourself, run `tools/build_release.sh`. It writes the zip to `dist/`. It compiles
 the `.sla` files with the SLEIGH compiler of the Ghidra in `GHIDRA_INSTALL_DIR`. If that is unset,
-it uses the Flatpak (`GHIDRA_FLATPAK=org.ghidra_sre.Ghidra`). The zip holds only the language
-files. The Java sources under `src/` are unused template stubs, so they are not built.
+it uses the Flatpak (`GHIDRA_FLATPAK=org.ghidra_sre.Ghidra`). The zip holds the language files and
+`ghidra_scripts/`. The loader and analyzer under `src/` are not in the zip.
 
 ### From source
 
@@ -61,19 +107,36 @@ tools/install_extension.sh --flatpak                              # Flatpak Ghid
 ```
 
 The script copies the language files from the checkout into the installed extension and compiles
-them. It uses these defaults:
+them. It copies the scripts from `ghidra_scripts/` into the extension's `ghidra_scripts/`. It also
+builds the loader and analyzer from `src/main/java` into the extension's `lib/RX62T.jar`. The jar
+is built locally only: it is not in the release zip and not in git (`lib/*.jar` is ignored). It
+uses these defaults:
 - Native: `~/.config/ghidra/ghidra_<version>_PUBLIC/Extensions/RX62T`.
 - Flatpak: `~/.var/app/<app id>/config/ghidra/ghidra_<version>_FLATPAK/Extensions/RX62T`.
 - `GHIDRA_VERSION` defaults to `12.1.3`, and `EXT` overrides the extension directory.
 
-The script first backs up the old `data/languages` to `~/ghidra_extension_backups`, or to
-`BACKUP_ROOT` if set. If a SLEIGH compile fails, it puts the backup back. It refuses to run while
-Ghidra is open. `tools/test_install.sh` tests it in scratch directories.
+The script first backs up the old `data/languages`, `lib/RX62T.jar` and `ghidra_scripts/` to
+`~/ghidra_extension_backups`, or to `BACKUP_ROOT` if set. If the jar build or a SLEIGH compile
+fails, it puts the backups back (a jar or scripts directory that did not exist before is removed
+again). It refuses to run while Ghidra is open. `tools/test_install.sh` tests it in scratch
+directories.
 
 **Never keep backups under `Extensions/RX62T/data/`.** Ghidra loads every `.ldefs` file below
 `data/`. So a copy such as `data/languages.bak/rx62t.ldefs` defines the languages a second time,
 and the old definition can win. The log then shows
 `Language rx62t:LE:32:default previously defined`.
+
+## Scripts
+
+Two scripts ship in `ghidra_scripts/` (Script Manager, category `RX`). Both are self-contained and
+do not need the loader jar.
+
+- `RxOrphanFunctions.java`: run after auto-analysis. Creates functions for disassembled code that
+  analysis left outside any function (code reached only through tail jumps or pointer tables).
+- `RxFixSignatures.java`: run after auto-analysis, once Decompiler Parameter ID has finished (the
+  RX62T Raw Binary loader turns it on). Gives functions still on the `unknown` calling convention
+  the cspec default and sets returns with no found value to `void`. User-defined signatures are
+  left alone. It refuses programs whose language is not an `rx62t` language.
 
 ## Known gaps
 
@@ -83,8 +146,13 @@ and the old definition can win. The log then shows
 - **Leftover `in_stack_*` parameters.** These remain mostly where data tables were disassembled as
   code. That is mainly a seeding problem in the analysed image. A calling-convention cause has not
   been ruled out.
-- **Decompiler Parameter ID is off by default** for this language. Enable it in the auto-analysis
-  options for better function signatures. Headless, set it in a pre-script.
+- **Pointer-table detection is heuristic.** It runs only for raw-image imports (*RX62T Raw Binary*
+  and *Raw Binary*); for other formats, such as ELF, the analyzer lays only the reset entry, the
+  INTB/EXTB vector tables and their handlers. The analyzer lays detected pointer tables before it
+  disassembles the reset code and handlers, so a false-positive pointer table over real code would
+  stop disassembly at that point. For raw images based at 0, zeros and small integers look like
+  pointers, so tables can be over-detected. For big-endian images imported with the *RX62T Raw
+  Binary* loader, detected pointer tables are already classified as data.
 
 ## Testing
 
@@ -105,3 +173,13 @@ With `GHIDRA_INSTALL_DIR=<ghidra install>` it uses that installation's `support/
 Only the files the script creates inside `STAGE` are removed. The vector format is documented at the
 top of `test/ghidra_scripts/RxVectorTest.java`. Semantics are checked against the RXv1 software
 manual (R01US0032EJ) and encodings against binutils `opcodes/rx-decode.opc`.
+
+With no vector-file arguments, `test/run_tests.sh` also builds `lib/RX62T.jar` into the staged
+extension and runs the loader/analyzer suite (`test/ghidra_scripts/RxLoaderTest.java`) on synthetic
+images; the final `RXTEST TOTAL` line covers both suites. `test/run_java_tests.sh` runs the pure-Java
+tests of the endianness classifier and helpers under `src/test/java` (no Ghidra headless run). Both
+pin the classifier on a committed realistic big-endian image built in code (`RealisticImage.java`):
+its exact code/data/fill blocks, and the full load and analysis of it. For the loader suite,
+`test/run_tests.sh` also compiles `src/test/java` into `lib/RX62T-tests.jar` of the staged extension
+only; that jar is never installed or released. Every test needs only a checkout and Ghidra: no
+other files or environment variables.
