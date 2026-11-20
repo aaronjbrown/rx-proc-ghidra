@@ -9,13 +9,11 @@
 #     RX62T/ghidra_scripts/
 #     RX62T/README.md
 #
-# Why not `gradle buildExtension` (support/buildExtension.gradle): that route works (in the Flatpak
-# the gradlew wrapper refuses non-PUBLIC builds, but GradleWrapperMain runs), yet compileJava fails
-# against Ghidra 12: src/main/java/rx62t holds the 2019 GhidraDev template stubs (a loader that
-# returns no load specs, an analyzer that never enables), written for the Ghidra 9 Loader API.
-# They contribute nothing, so this script builds a languages-only extension without lib/RX62T.jar
-# and leaves the Java sources as upstream has them. buildExtension.gradle also zips everything in
-# the project directory, untracked files included; this script packs only committed files.
+# The zip holds the language files and ghidra_scripts/: it deliberately omits lib/RX62T.jar (the
+# RX62T Raw Binary loader and the analyzer) and src/. The upstream project (Tim---/rx-proc-ghidra,
+# based on James Chambers' 2019 work) has no LICENSE, so the jar is not shipped. It is built
+# locally from a checkout by tools/install_extension.sh. This script packs only committed files
+# (buildExtension.gradle would zip everything in the project directory, untracked files included).
 #
 # Ghidra accepts an extension only when extension.properties' version equals its own
 # application.version; the release name (PUBLIC, FLATPAK, ...) is not checked, so one zip serves

@@ -50,11 +50,30 @@ for s in rx62t rx62t_be; do
         && pass "$s.sla compiled" || fail "$s.sla missing or stale"
 done
 [ -f "$SCRATCH/ext/INSTALLED_FROM.txt" ] && pass "INSTALLED_FROM.txt written" || fail "INSTALLED_FROM.txt missing"
+if [ -f "$SCRATCH/ext/lib/RX62T.jar" ] && unzip -l "$SCRATCH/ext/lib/RX62T.jar" 2> /dev/null | grep -q 'rx62t/RX62TLoader.class'; then
+    pass "lib/RX62T.jar built with RX62TLoader.class"
+else
+    fail "lib/RX62T.jar missing or without rx62t/RX62TLoader.class"
+fi
+scripts_ok=1
+for f in "$REPO"/ghidra_scripts/*.java "$REPO/ghidra_scripts/README.txt"; do
+    cmp -s "$f" "$SCRATCH/ext/ghidra_scripts/$(basename "$f")" || scripts_ok=
+done
+[ -n "$scripts_ok" ] && [ -f "$SCRATCH/ext/ghidra_scripts/RxOrphanFunctions.java" ] \
+    && [ -f "$SCRATCH/ext/ghidra_scripts/RxFixSignatures.java" ] \
+    && pass "ghidra_scripts installed and identical to the checkout" || fail "ghidra_scripts missing or different from the checkout"
 
-# 2. SLEIGH compile error: non-zero exit, languages dir restored from the backup
+# 2. SLEIGH compile error: non-zero exit, languages dir restored from the backup, and the jar
+#    (or its absence) and ghidra_scripts (or its absence) restored byte-for-byte.
+#    2a: a jar and scripts were installed before; 2b: neither was.
 new_ext
+mkdir -p "$SCRATCH/ext/lib"; echo 'old jar' > "$SCRATCH/ext/lib/RX62T.jar"
+mkdir -p "$SCRATCH/ext/ghidra_scripts"; echo 'old script' > "$SCRATCH/ext/ghidra_scripts/RxOrphanFunctions.java"
+echo 'user script' > "$SCRATCH/ext/ghidra_scripts/Mine.java"
+rm -rf "$SCRATCH/scripts-before"; cp -a "$SCRATCH/ext/ghidra_scripts" "$SCRATCH/scripts-before"
 rm -rf "$SCRATCH/broken"; mkdir -p "$SCRATCH/broken/data"
 cp -a "$REPO/data/languages" "$SCRATCH/broken/data/"
+cp -a "$REPO/src" "$REPO/ghidra_scripts" "$SCRATCH/broken/"
 echo 'this is not sleigh ;' >> "$SCRATCH/broken/data/languages/rx62t.slaspec"
 run_install "$SCRATCH/broken" > "$SCRATCH/broken.log" 2>&1; rc=$?
 [ "$rc" -ne 0 ] && pass "broken slaspec exits non-zero ($rc)" || fail "broken slaspec exited 0"
@@ -65,6 +84,19 @@ else
     fail "languages dir differs from backup after failed compile"
 fi
 [ ! -f "$SCRATCH/ext/INSTALLED_FROM.txt" ] && pass "no INSTALLED_FROM.txt after failure" || fail "INSTALLED_FROM.txt written on failure"
+[ "$(cat "$SCRATCH/ext/lib/RX62T.jar" 2> /dev/null)" = 'old jar' ] \
+    && pass "previous jar restored after failed compile" || fail "previous jar not restored after failed compile"
+[ -z "$(find "$SCRATCH/ext/data" -name '*.jar*')" ] && pass "no jar backup under EXT/data" || fail "jar backup under EXT/data"
+diff -r "$SCRATCH/scripts-before" "$SCRATCH/ext/ghidra_scripts" > /dev/null \
+    && pass "previous ghidra_scripts restored after failed compile" || fail "ghidra_scripts not restored after failed compile"
+[ -z "$(find "$SCRATCH/ext/data" -name '*scripts*')" ] && pass "no scripts backup under EXT/data" || fail "scripts backup under EXT/data"
+
+new_ext
+run_install "$SCRATCH/broken" > "$SCRATCH/broken2.log" 2>&1; rc=$?
+{ [ "$rc" -ne 0 ] && [ ! -e "$SCRATCH/ext/lib/RX62T.jar" ]; } \
+    && pass "no jar left behind after failed compile" || fail "jar left behind after failed compile (rc=$rc)"
+[ ! -e "$SCRATCH/ext/ghidra_scripts" ] \
+    && pass "no ghidra_scripts left behind after failed compile" || fail "ghidra_scripts left behind after failed compile"
 
 # 3. extension never installed: exit 2, tell the user to install the zip once
 rm -rf "$SCRATCH/ext"
@@ -89,7 +121,9 @@ cat > "$SCRATCH/fakeghidra/support/sleigh" <<'EOF'
 echo "stub sla for $1" > "$2"
 EOF
 chmod +x "$SCRATCH/fakeghidra/support/sleigh"
-GHIDRA_INSTALL_DIR="$SCRATCH/fakeghidra" run_install "$REPO" > "$SCRATCH/native.log" 2>&1; rc=$?
+# stand-in for build_jar (a stub installation cannot compile): $1 = checkout, $2 = jar to write
+printf '#!/bin/sh\necho "stub jar" > "$2"\n' > "$SCRATCH/fakejar.sh"; chmod +x "$SCRATCH/fakejar.sh"
+RX_BUILD_JAR_CMD="$SCRATCH/fakejar.sh" GHIDRA_INSTALL_DIR="$SCRATCH/fakeghidra" run_install "$REPO" > "$SCRATCH/native.log" 2>&1; rc=$?
 { [ "$rc" -eq 0 ] && grep -q 'stub sla' "$SCRATCH/ext/data/languages/rx62t.sla"; } \
     && pass "native mode uses GHIDRA_INSTALL_DIR/support/sleigh" || fail "native mode: rc=$rc (see $SCRATCH/native.log)"
 
