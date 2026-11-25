@@ -13,9 +13,10 @@ Notes for coding agents working on this repository: a Ghidra processor module fo
   statistical code/data classifier in `RX62TBEClassifier`), the *RX62T Platform Setup* analyzer
   (`RX62TAnalyzer`) and the Ghidra-free scans they share (`RX62TBEUtils`). `test/run_tests.sh` and
   the install script build them into the extension's `lib/RX62T.jar`. The release zip holds the
-  language files and `ghidra_scripts/`, but not the jar.
-- `ghidra_scripts/`: the RX scripts (`RxOrphanFunctions.java`, `RxFixSignatures.java`), shipped in
-  the release zip and copied by the install script.
+  language files and `ghidra_scripts/`, but not the jar; only `build_release.sh --with-jar` adds it,
+  to a `-local` zip for the builder's own machine that must never be published.
+- `ghidra_scripts/`: the RX scripts (`RxOrphanFunctions.java`, `RxFixSignatures.java`,
+  `RxUnlockSignatures.java`), shipped in the release zip and copied by the install script.
 - `src/test/java/rx62t/`: dependency-free test mains for the scans and the classifier
   (`test/run_java_tests.sh`), and `RealisticImage.java`, the committed synthetic big-endian test
   image. `test/ghidra_scripts/RxLoaderTest.java`: headless loader and analyzer cases.
@@ -37,8 +38,10 @@ test/run_tests.sh                    # compile both languages, run all vectors u
 test/run_tests.sh test/vectors/X.vec # one vector file (no loader suite)
 test/run_java_tests.sh               # build the jar, run the src/test/java test mains
 tools/build_release.sh               # dist/ghidra_<ver>_PUBLIC_<date>_RX62T.zip
+tools/build_release.sh --with-jar    # dist/..._RX62T-local.zip with lib/RX62T.jar (local install only; never publish)
 tools/install_extension.sh           # copy and compile into an installed extension (Ghidra closed)
 tools/test_install.sh                # self-test for the install script
+tools/test_release.sh                # self-test for build_release.sh (plain and --with-jar zips)
 ```
 
 The scripts use `GHIDRA_INSTALL_DIR` for a native Ghidra; otherwise they use the Flatpak

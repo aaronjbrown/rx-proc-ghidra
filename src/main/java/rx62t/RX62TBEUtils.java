@@ -6,10 +6,11 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.function.LongPredicate;
 
 /**
  * Structural scans of Renesas RX raw flash images (no Ghidra dependencies): word swapping, pointer
- * tables, the INTB/EXTB setup in the reset code and the reset entry.
+ * tables, the INTB/EXTB setup in the reset code, the vector-table sizes and the reset entry.
  */
 public final class RX62TBEUtils {
     /** Byte range in an image; end is exclusive. */
@@ -20,6 +21,16 @@ public final class RX62TBEUtils {
 
     public static final long RESET_VECTOR = 0xFFFFFFFCL;
     public static final int INTB_LEN = 1024, EXTB_LEN = 128;
+
+    /**
+     * Vector-table entries as the RXv2/RXv3 manuals define them (section 1.7): INTB holds 256 vectors; EXTB
+     * holds the exception vectors at ExtBase+00h to +78h, plus the reset vector at +7Ch only when ExtBase
+     * is the fixed vector table {@link #FIXED_EXTB} (the reset vector is always at {@link #RESET_VECTOR}).
+     */
+    public static final int INTB_ENTRIES = 256, EXTB_ENTRIES = 31;
+
+    /** Reset value of EXTB: the fixed vector table, whose last slot is the reset vector. */
+    public static final long FIXED_EXTB = 0xFFFFFF80L;
 
     /** Bytes at the image start scanned for the reset code's INTB/EXTB setup. */
     static final int CODE_WINDOW = 0x100;
@@ -46,11 +57,21 @@ public final class RX62TBEUtils {
     /** Runs of aligned dwords pointing into the image (zeros allowed between pointers). */
     public static List<Range> findPointerTables(byte[] img, long base, int minPtrs, boolean bigEndian) {
         long top = base + img.length;
+        return findPointerRuns(img, base, minPtrs, bigEndian, v -> base <= v && v < top);
+    }
+
+    /**
+     * Runs of at least {@code minPtrs} aligned dwords whose values satisfy {@code isTarget}, with single
+     * zero dwords allowed between them; offsets in {@code img}, which starts at {@code base}. A run says
+     * only that these slots hold pointers, not where a table starts or ends.
+     */
+    public static List<Range> findPointerRuns(byte[] img, long base, int minPtrs, boolean bigEndian,
+            LongPredicate isTarget) {
         List<Range> tables = new ArrayList<>();
         int runStart = -1, runLast = -1, runCount = 0;
         for (int o = 0; o + 4 <= img.length; o += 4) {
             long v = u32(img, o, bigEndian);
-            if (base <= v && v < top) {
+            if (isTarget.test(v)) {
                 if (runCount == 0) runStart = o;
                 runLast = o;
                 runCount++;
@@ -103,6 +124,87 @@ public final class RX62TBEUtils {
      */
     public static boolean hasVectorSetup(byte[] head, boolean codeSwapped) {
         return !scanVectorSetup(head, codeSwapped).isEmpty();
+    }
+
+    /**
+     * The INTB/EXTB values set by the reset code in the first {@link #CODE_WINDOW} bytes of {@code code},
+     * which is in instruction-fetch order, by register name. The values are not checked against any base.
+     */
+    public static Map<String, Long> vectorSetup(byte[] code) {
+        return scanVectorSetup(code, false);
+    }
+
+    /** Entries of the named vector table ("INTB" or "EXTB") at {@code address}: 256, or 31 (32 at FFFFFF80h). */
+    public static int vectorTableEntries(String name, long address) {
+        if (name.equals("INTB")) return INTB_ENTRIES;
+        return address == FIXED_EXTB ? EXTB_ENTRIES + 1 : EXTB_ENTRIES;
+    }
+
+    /** The label of slot {@code slot} of the named vector table: {@code int_vect_NNN} or {@code exc_vect_NN}. */
+    public static String vectorSlotLabel(String table, int slot) {
+        return table.equals("INTB") ? String.format("int_vect_%03d", slot) : String.format("exc_vect_%02d", slot);
+    }
+
+    /**
+     * The architected EXTB slots, by slot index (offset / 4), from RXv3 R01US0316EJ0100 Figure 1.8 (p. 34)
+     * and RXv2 R01US0071EJ0100 Figure 1.8 (p. 32). Slot 31 (+7Ch) is the reset vector, which only the fixed
+     * table at {@link #FIXED_EXTB} holds.
+     */
+    private static final Map<Integer, String> EXTB_COMMENTS = Map.of(
+            20, "Privileged instruction exception",
+            21, "Access exception",
+            23, "Undefined instruction exception",
+            24, "Address exception (RXv3; reserved on RXv2)",
+            25, "Floating-point exception (single-precision on RXv3)",
+            30, "Non-maskable interrupt");
+
+    /** The manual's name for EXTB slot {@code slot}, {@code Reset} for slot 31 when {@code fixed}, else null. */
+    public static String extbSlotComment(int slot, boolean fixed) {
+        if (slot == 31) return fixed ? "Reset" : null;
+        return EXTB_COMMENTS.get(slot);
+    }
+
+    /** A pointer run makes functions only with this many code slots pointing to this many distinct targets. */
+    public static final int MIN_CODE_SLOTS = 4, MIN_CODE_TARGETS = 2;
+
+    /**
+     * The distinct code targets of a pointer run's slots, in first-seen order, or an empty list unless at
+     * least {@link #MIN_CODE_SLOTS} slots satisfy {@code isCode} and they name at least
+     * {@link #MIN_CODE_TARGETS} distinct targets. The distinct-target rule leaves out linker section tables,
+     * whose entries repeat one end-of-code address.
+     */
+    public static List<Long> codePointerTargets(long[] slots, LongPredicate isCode) {
+        int code = 0;
+        java.util.LinkedHashSet<Long> targets = new java.util.LinkedHashSet<>();
+        for (long v : slots) {
+            if (!isCode.test(v)) continue;
+            code++;
+            targets.add(v);
+        }
+        if (code < MIN_CODE_SLOTS || targets.size() < MIN_CODE_TARGETS) return List.of();
+        return List.copyOf(targets);
+    }
+
+    /**
+     * Runs of at least {@link #MIN_CODE_SLOTS} aligned dwords in {@code img} whose values satisfy {@code isCode},
+     * with at most one dword of any value between two of them, as in tables of {handler, flag} or {id, handler}
+     * entries; two such dwords in a row end the run. A run starts at its first code slot and ends after its last.
+     */
+    public static List<Range> findCodePointerRuns(byte[] img, boolean bigEndian, LongPredicate isCode) {
+        List<Range> runs = new ArrayList<>();
+        int start = -1, last = -1, count = 0;
+        for (int o = 0; o + 4 <= img.length; o += 4) {
+            if (!isCode.test(u32(img, o, bigEndian))) continue;
+            if (count > 0 && o - last > 8) {
+                if (count >= MIN_CODE_SLOTS) runs.add(new Range(start, last + 4));
+                count = 0;
+            }
+            if (count == 0) start = o;
+            last = o;
+            count++;
+        }
+        if (count >= MIN_CODE_SLOTS) runs.add(new Range(start, last + 4));
+        return runs;
     }
 
     /** The INTB/EXTB values the reset code at the start of img sets, by register name. */
