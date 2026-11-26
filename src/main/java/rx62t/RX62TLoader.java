@@ -10,6 +10,7 @@ import ghidra.app.util.opinion.LoadSpec;
 import ghidra.app.util.opinion.Loader;
 import ghidra.app.util.opinion.LoaderTier;
 import ghidra.framework.model.DomainObject;
+import ghidra.framework.options.Options;
 import ghidra.framework.store.LockException;
 import ghidra.program.database.mem.FileBytes;
 import ghidra.program.model.address.Address;
@@ -41,7 +42,8 @@ import rx62t.RX62TBEClassifier.Kind;
  * big-endian language the code words (which a big-endian RX fetches word-swapped) are put back into
  * instruction-fetch order using {@link RX62TBEClassifier}; data stays as stored. The original file
  * bytes are kept in the program's {@link FileBytes}. Decompiler Parameter ID is turned on in the
- * program's analysis options. Of the two load specs, the byte order whose reset code sets INTB/EXTB is
+ * program's analysis options, and so is Scalar Operand References when the RAM block moves the
+ * minimum address to 0 (which would otherwise turn it off). Of the two load specs, the byte order whose reset code sets INTB/EXTB is
  * preferred. Add To Program ({@link #loadProgramInto}) only adds the image: the memory-map option
  * defaults to off and the Parameter ID setting of the existing program is left alone (ruling R3).
  */
@@ -60,6 +62,11 @@ public class RX62TLoader extends AbstractProgramWrapperLoader {
             new MapBlock("PERIPH", 0x00080000L, 0x00080000L, true));
     /** Analysis option of Ghidra's DecompilerFunctionAnalyzer; by default it is on only for PE programs. */
     static final String PARAM_ID_ANALYZER = "Decompiler Parameter ID";
+    /**
+     * Ghidra's ScalarOperandAnalyzer, which turns immediates such as {@code MOV.L #imm32,Rn} into
+     * references. Its default enablement is off for a program whose minimum address is 0.
+     */
+    static final String SCALAR_REFS_ANALYZER = "Scalar Operand References";
 
     private static final String LE_ID = "rx62t:LE:32:default", BE_ID = "rx62t:BE:32:default";
     private static final String COMPILER = "default";
@@ -215,7 +222,14 @@ public class RX62TLoader extends AbstractProgramWrapperLoader {
             }
 
             if (memoryMapOption(settings.options(), !intoExisting)) addMemoryMap(program, settings);
-            if (!intoExisting) program.getOptions(Program.ANALYSIS_PROPERTIES).setBoolean(PARAM_ID_ANALYZER, true);
+            if (!intoExisting) {
+                Options analysis = program.getOptions(Program.ANALYSIS_PROPERTIES);
+                analysis.setBoolean(PARAM_ID_ANALYZER, true);
+                // Ghidra defaults Scalar Operand References to off when the minimum address is 0, which
+                // the RAM block makes it; keep the default the image alone would get (on, unless at 0)
+                if (base != 0 && program.getMinAddress().getOffset() == 0)
+                    analysis.setBoolean(SCALAR_REFS_ANALYZER, true);
+            }
 
             RX62TBEUtils.Entry entry = RX62TBEUtils.resetEntry(img, base, bigEndian);
             Address entryAddr = start.getNewAddress(entry.address());

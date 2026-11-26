@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 0.4.0 - 2026-11-23
+
+### Added
+
+- **RX62T Platform Setup analyzer: vector slot labels.** Every slot of the INTB array is labelled `int_vect_NNN` (`000`–`255`, NULL slots included) and every slot of the EXTB array `exc_vect_NN` (`00`–`30`, or `00`–`31` at `0xFFFFFF80`). EXTB slots 20, 21, 23, 24, 25 and 30 (and 31, `Reset`, at `0xFFFFFF80`) get the manual's name as an EOL comment (RXv3 R01US0316EJ0100 and RXv2 R01US0071EJ0100, Figure 1.8). Existing labels and EOL comments are kept, and a user's label stays primary.
+- **RX62T Platform Setup analyzer: functions at code-pointer targets.** For a run in a non-executable block of at least 4 slots pointing into initialized executable memory, with at least 2 distinct targets, a function is made at each target. One dword of any value may sit between two such slots, so tables of {handler, flag} entries count. Targets whose first word is `FFFFFFFF` (erased flash) do not count. A raw image imported as one executable block gets no such functions until code and data are split into blocks with correct execute flags (then run the analyzer again, for example as a one-shot analysis).
+- **`RxUnlockSignatures` script.** It sets ANALYSIS signatures with no parameters back to DEFAULT, for when `RxFixSignatures` ran before Decompiler Parameter ID had finished. Then run Decompiler Parameter ID as a one-shot analysis and `RxFixSignatures` again.
+- **`tools/build_release.sh --with-jar`.** It builds `..._RX62T-local.zip`, which includes `lib/RX62T.jar` built from the same revision, for installing the loader and the analyzer from the GUI on your own machine. Upstream states no licence, so this zip must not be published. A new `DIST_DIR` sets the output directory.
+- **`tools/test_release.sh`**, a self-test for `build_release.sh`, which also checks headlessly that Ghidra loads the loader and the analyzer from an installed `-local` zip.
+
+### Changed
+
+- **RX62T Platform Setup analyzer: pointer runs.** Detected pointer runs are marked one `pointer` per slot (Ghidra's default pointer type, the one its operand analyzer creates) instead of one `pointer[N]` array. A run no longer claims where a table starts or ends. Slots that already hold data are left alone, and NULL slots stay undefined. The word `0xFFFFFFFF` (erased flash) is never taken for a pointer. Programs analysed under 0.3.0 keep their `pointer[N]` arrays when analysed again, because existing data wins; re-import them to get per-slot pointers.
+
+### Fixed
+
+- **Fewer references with the memory map.** Ghidra turns its *Scalar Operand References* analyzer off by default when a program's minimum address is 0, and the loader's `RAM` block at `0x00000000` made it 0. Imports with *Add RX RAM and peripheral I/O blocks* on therefore got no references from immediates such as `MOV.L #imm32,Rn`, into RAM, I/O or code: about 10–20% fewer references than the same import with the option off. The loader now turns that analyzer on when its blocks moved the minimum address to 0, so both imports give the same references. An image loaded at 0 keeps Ghidra's default (off).
+- **Lost references.** Typing the first entry of a detected run, for example from a script, no longer removes the other entries and their references.
+- **EXTB size.** EXTB is laid as 31 entries (ExtBase+00h to +78h), or 32 at `0xFFFFFF80`, where the last slot is the reset vector (RXv2 and RXv3 software manuals, section 1.7.1). It was 32 everywhere.
+- **Programs with several memory blocks.** The reset entry is resolved once per program (reset vector, else the `reset` symbol, else the image base), and only the reset code there is scanned. INTB and EXTB are laid in whichever blocks hold them, and handler functions stay in the handler's block. Pointer targets in any initialized block count. Before, each block was scanned on its own, so tables in other blocks were never laid, and the start of any block could be taken for reset code.
+- **Overlapping vector tables.** When the reset code sets INTB and EXTB to overlapping ranges, the table set up first is kept and the other is not laid. Before, laying the second cleared the first.
+
 ## 0.3.0 - 2026-11-20
 
 ### Added

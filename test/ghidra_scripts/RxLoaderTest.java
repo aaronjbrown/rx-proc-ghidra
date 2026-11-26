@@ -23,6 +23,7 @@ import ghidra.program.model.address.AddressIterator;
 import ghidra.program.model.address.AddressSet;
 import ghidra.program.model.data.DataType;
 import ghidra.program.model.lang.LanguageCompilerSpecPair;
+import ghidra.program.model.listing.CommentType;
 import ghidra.program.model.listing.Data;
 import ghidra.program.model.listing.Function;
 import ghidra.program.model.listing.Instruction;
@@ -75,6 +76,34 @@ public class RxLoaderTest extends GhidraScript {
         caseRun("analyzer_ptr_table_keeps_user_data", this::analyzerPtrTableKeepsUserData);
         caseRun("analyzer_entry_extra_block", this::analyzerEntryExtraBlock);
         caseRun("analyzer_handler_into_table_skipped", this::analyzerHandlerIntoTableSkipped);
+        caseRun("analyzer_ptr_adjacent_runs", this::analyzerPtrAdjacentRuns);
+        caseRun("analyzer_ptr_retype_first_slot", this::analyzerPtrRetypeFirstSlot);
+        caseRun("analyzer_ptr_null_slot", this::analyzerPtrNullSlot);
+        caseRun("analyzer_ptr_cross_block", this::analyzerPtrCrossBlock);
+        caseRun("analyzer_ptr_into_ram_ignored", this::analyzerPtrIntoRamIgnored);
+        caseRun("analyzer_ptr_rerun", this::analyzerPtrRerun);
+        caseRun("analyzer_partial_set_keeps_exclusion", this::analyzerPartialSetKeepsExclusion);
+        caseRun("analyzer_erased_fill_not_pointers", this::analyzerErasedFillNotPointers);
+        caseRun("analyzer_split_blocks", this::analyzerSplitBlocks);
+        caseRun("analyzer_no_false_reset_scan", this::analyzerNoFalseResetScan);
+        caseRun("analyzer_extb_fixed", this::analyzerExtbFixed);
+        caseRun("analyzer_reset_vector_into_ram", this::analyzerResetVectorIntoRam);
+        caseRun("analyzer_split_inside_intb", this::analyzerSplitInsideIntb);
+        caseRun("analyzer_handler_unmapped", this::analyzerHandlerUnmapped);
+        caseRun("analyzer_intb_slot_labels", this::analyzerIntbSlotLabels);
+        caseRun("analyzer_extb_slot_labels", this::analyzerExtbSlotLabels);
+        caseRun("analyzer_slot_labels_user_and_rerun", this::analyzerSlotLabelsUserAndRerun);
+        caseRun("analyzer_extb_comment_survives_retype", this::analyzerExtbCommentSurvivesRetype);
+        caseRun("analyzer_reset_window_gap", this::analyzerResetWindowGap);
+        caseRun("analyzer_overlapping_tables", this::analyzerOverlappingTables);
+        caseRun("analyzer_code_ptrs_functions", this::analyzerCodePtrsFunctions);
+        caseRun("analyzer_code_ptrs_one_target", this::analyzerCodePtrsOneTarget);
+        caseRun("analyzer_code_ptrs_single_block", this::analyzerCodePtrsSingleBlock);
+        caseRun("analyzer_code_ptrs_erased_target", this::analyzerCodePtrsErasedTarget);
+        caseRun("analyzer_code_ptrs_mixed_data", this::analyzerCodePtrsMixedData);
+        caseRun("analyzer_code_ptrs_flag_gaps", this::analyzerCodePtrsFlagGaps);
+        caseRun("analyzer_code_ptrs_two_gaps", this::analyzerCodePtrsTwoGaps);
+        caseRun("analyzer_code_ptrs_skips_code", this::analyzerCodePtrsSkipsCode);
         caseRun("realistic_image_end_to_end", this::realisticImageEndToEnd);
         caseRun("loadspec_prefers_be", () -> loadSpecs(intbImage(), BE));
         caseRun("loadspec_prefers_le", () -> loadSpecs(leStubImage(), LE));
@@ -84,12 +113,16 @@ public class RxLoaderTest extends GhidraScript {
         caseRun("memmap_off", this::memmapOff);
         caseRun("memmap_overlap", this::memmapOverlap);
         caseRun("memmap_overlap_periph", this::memmapOverlapPeriph);
+        caseRun("memmap_scalar_refs", this::memmapScalarRefs);
+        caseRun("memmap_scalar_image_at_zero", this::memmapScalarImageAtZero);
         caseRun("param_id_default", this::paramIdDefault);
         caseRun("param_id_only_this_loader", this::paramIdOnlyThisLoader);
         caseRun("add_to_program_no_side_effects", this::addToProgramNoSideEffects);
         caseRun("orphan_functions", this::orphanFunctions);
         caseRun("fix_signatures", this::fixSignatures);
         caseRun("fix_signatures_refuses_other_language", this::fixSignaturesRefuses);
+        caseRun("unlock_signatures", this::unlockSignatures);
+        caseRun("unlock_signatures_refuses_other_language", this::unlockSignaturesRefuses);
         println("RXTEST SUMMARY loader pass=" + pass + " fail=" + fail);
     }
 
@@ -117,7 +150,7 @@ public class RxLoaderTest extends GhidraScript {
         return withProgram("be_entry_vector", entryVectorImage(), BE, 0xFFFFFF00L, p -> checkEntry(p, 0xFFFFFF10L));
     }
 
-    /** Ruling R3: the fixed vector table 0xFFFFFF80..0xFFFFFFFF is never word-swapped. */
+    /** The fixed vector table 0xFFFFFF80..0xFFFFFFFF is never word-swapped. */
     private String beFixedVectorsUnswapped() throws Exception {
         byte[] img = entryVectorImage();
         long base = 0xFFFFFF00L;
@@ -264,18 +297,28 @@ public class RxLoaderTest extends GhidraScript {
         });
     }
 
-    private String analyzerExtbLe() throws Exception {
-        long base = 0x1000, extb = base + 0x100, handler = base + 0x180;
+    private static final long EXTB_BASE = 0x1000, EXTB_ADDR = EXTB_BASE + 0x100, EXTB_HANDLER = EXTB_BASE + 0x180;
+
+    /** LE image at EXTB_BASE: MVTC #EXTB_ADDR,EXTB; NOP; NOP; RTS, then 32 x le32(EXTB_HANDLER) and an RTE there. */
+    private static byte[] extbLeImage() {
+        long extb = EXTB_ADDR;
         byte[] img = new byte[0x200];
-        byte[] stub = bytes(0xFD, 0x73, 0x0D, (int) extb & 0xFF, (int) (extb >> 8) & 0xFF, 0, 0, 3, 3, 2); // MVTC #extb,EXTB; NOP; NOP; RTS
+        byte[] stub = bytes(0xFD, 0x73, 0x0D, (int) extb & 0xFF, (int) (extb >> 8) & 0xFF, 0, 0, 3, 3, 2);
         System.arraycopy(stub, 0, img, 0, stub.length);
-        for (int i = 0; i < 32; i++) System.arraycopy(le32(handler), 0, img, 0x100 + 4 * i, 4);
+        for (int i = 0; i < 32; i++) System.arraycopy(le32(EXTB_HANDLER), 0, img, 0x100 + 4 * i, 4);
         img[0x180] = 0x7F;
         img[0x181] = (byte) 0x95; // RTE
+        return img;
+    }
+
+    private String analyzerExtbLe() throws Exception {
+        long base = EXTB_BASE, extb = EXTB_ADDR, handler = EXTB_HANDLER;
+        byte[] img = extbLeImage();
         return withProgram("analyzer_extb_le", img, LE, base, p -> {
             String err = runAnalyzer(p);
             if (err == null) err = checkLabel(p, extb, "EXTB");
-            if (err == null) err = checkPointerArray(p, extb, 32);
+            if (err == null) err = checkPointerArray(p, extb, 31);
+            if (err == null) err = checkUndefined(p, extb + 0x7C, 4); // relocated EXTB: +7Ch is not a vector
             return err != null ? err : checkFunction(p, handler, null, "RTE");
         });
     }
@@ -289,15 +332,125 @@ public class RxLoaderTest extends GhidraScript {
         return withProgram("analyzer_vectors_before_code", img, LE, base, p -> {
             String err = runAnalyzer(p);
             if (err == null) err = checkLabel(p, extb, "EXTB");
-            if (err == null) err = checkPointerArray(p, extb, 32);
+            if (err == null) err = checkPointerArray(p, extb, 31);
             return err != null ? err : checkFunction(p, base, null, null);
         });
     }
 
+    private static final long PTR_TABLE = STUB_BASE + 0x540, PTR_TARGET = STUB_BASE + 0x5C0;
+
+    /** Null when slots [from, to) of the 16-slot table at PTR_TABLE are single pointers to PTR_TARGET. */
+    private static String checkPtrSlots(Program p, int from, int to) {
+        String err = null;
+        for (int i = from; i < to && err == null; i++) err = checkPointer(p, PTR_TABLE + 4 * i, PTR_TARGET);
+        return err;
+    }
+
+    /** A heuristic run is marked one pointer per slot, never as an array (spec F1-F4). */
     private String analyzerPtrTable() throws Exception {
         return withProgram("analyzer_ptr_table", ptrTableImage(), BE, STUB_BASE, p -> {
             String err = runAnalyzer(p);
-            return err != null ? err : checkPointerArray(p, STUB_BASE + 0x540, 16);
+            return err != null ? err : checkPtrSlots(p, 0, 16);
+        });
+    }
+
+    /**
+     * A one-shot run over a selection that misses the relocated EXTB still keeps the run over
+     * EXTB skipped, so EXTB+7Ch stays undefined.
+     */
+    private String analyzerPartialSetKeepsExclusion() throws Exception {
+        long base = EXTB_BASE, extb = EXTB_ADDR;
+        byte[] img = extbLeImage();
+        return withProgram("analyzer_partial_set_keeps_exclusion", img, LE, base, p -> {
+            String err = runAnalyzer(p);
+            if (err == null) err = runAnalyzer(p, new AddressSet(addr(p, base + 0x1C0), addr(p, base + 0x1CF)));
+            if (err == null) err = checkPointerArray(p, extb, 31);
+            return err != null ? err : checkUndefined(p, extb + 0x7C, 4);
+        });
+    }
+
+    /** Erased flash (0xFFFFFFFF words) in an image reaching FFFFFFFF is not a pointer run. */
+    private String analyzerErasedFillNotPointers() throws Exception {
+        long base = 0xFFFFFF00L;
+        byte[] img = new byte[0x100];
+        Arrays.fill(img, 0x40, 0x80, (byte) 0xFF);
+        return withProgram("analyzer_erased_fill_not_pointers", img, LE, base, p -> {
+            String err = runAnalyzer(p);
+            return err != null ? err : checkUndefined(p, base + 0x40, 0x40);
+        });
+    }
+
+    /** Spec F1: two adjacent tables give single pointers with their own references, and no array. */
+    private String analyzerPtrAdjacentRuns() throws Exception {
+        long t2 = STUB_BASE + 0x5D0;
+        byte[] img = stubImage();
+        for (int i = 0; i < 5; i++) System.arraycopy(be32(PTR_TARGET), 0, img, 0x540 + 4 * i, 4);
+        for (int i = 5; i < 11; i++) System.arraycopy(be32(t2), 0, img, 0x540 + 4 * i, 4);
+        return withProgram("analyzer_ptr_adjacent_runs", img, BE, STUB_BASE, p -> {
+            String err = runAnalyzer(p);
+            for (int i = 0; i < 11 && err == null; i++) err = checkPointer(p, PTR_TABLE + 4 * i, i < 5 ? PTR_TARGET : t2);
+            if (err != null) return err;
+            for (Data d : p.getListing().getDefinedData(new AddressSet(addr(p, PTR_TABLE), addr(p, PTR_TABLE + 43)), true))
+                if (d.isArray()) return "array at " + d.getAddress() + ": " + d.getDataType().getName();
+            return null;
+        });
+    }
+
+    /** Spec F4: typing the first slot of a run, as an annotation would, keeps every other slot and reference. */
+    private String analyzerPtrRetypeFirstSlot() throws Exception {
+        return withProgram("analyzer_ptr_retype_first_slot", ptrTableImage(), BE, STUB_BASE, p -> {
+            String err = runAnalyzer(p);
+            if (err != null) return err;
+            int tx = p.startTransaction("annotate");
+            try {
+                ghidra.program.model.data.DataUtilities.createData(p, addr(p, PTR_TABLE),
+                        ghidra.program.model.data.PointerDataType.dataType, -1,
+                        ghidra.program.model.data.DataUtilities.ClearDataMode.CLEAR_ALL_CONFLICT_DATA);
+            }
+            finally {
+                p.endTransaction(tx, true);
+            }
+            return checkPtrSlots(p, 1, 16);
+        });
+    }
+
+    /** A NULL slot inside a run stays undefined. */
+    private String analyzerPtrNullSlot() throws Exception {
+        byte[] img = stubImage();
+        for (int i = 0; i < 5; i++) System.arraycopy(be32(i == 2 ? 0 : PTR_TARGET), 0, img, 0x540 + 4 * i, 4);
+        return withProgram("analyzer_ptr_null_slot", img, BE, STUB_BASE, p -> {
+            String err = runAnalyzer(p);
+            if (err == null) err = checkPtrSlots(p, 0, 2);
+            if (err == null) err = checkPtrSlots(p, 3, 5);
+            return err != null ? err : checkUndefined(p, PTR_TABLE + 8, 4);
+        });
+    }
+
+    /** Pointers into another initialized block count. */
+    private String analyzerPtrCrossBlock() throws Exception {
+        return withProgram("analyzer_ptr_cross_block", ptrTableImage(), BE, STUB_BASE, p -> {
+            splitAt(p, STUB_BASE + 0x580);
+            String err = runAnalyzer(p);
+            return err != null ? err : checkPtrSlots(p, 0, 16);
+        });
+    }
+
+    /** Values into the uninitialized RAM block are not pointers. */
+    private String analyzerPtrIntoRamIgnored() throws Exception {
+        byte[] img = stubImage();
+        for (int i = 0; i < 6; i++) System.arraycopy(be32(0x00001000L), 0, img, 0x540 + 4 * i, 4);
+        return withProgram("analyzer_ptr_into_ram_ignored", img, BE, STUB_BASE, p -> {
+            String err = runAnalyzer(p);
+            return err != null ? err : checkUndefined(p, PTR_TABLE, 24);
+        });
+    }
+
+    /** A second run changes nothing and logs nothing. */
+    private String analyzerPtrRerun() throws Exception {
+        return withProgram("analyzer_ptr_rerun", ptrTableImage(), BE, STUB_BASE, p -> {
+            String err = runAnalyzer(p);
+            if (err == null) err = runAnalyzer(p);
+            return err != null ? "second run: " + err : checkPtrSlots(p, 0, 16);
         });
     }
 
@@ -340,7 +493,7 @@ public class RxLoaderTest extends GhidraScript {
         });
     }
 
-    /** Ruling R8: the heuristic pointer-table step runs only for raw-image formats; vector tables still do. */
+    /** The heuristic pointer-table step runs only for raw-image formats; vector tables still do. */
     private String analyzerNoPtrTablesOtherFormat() throws Exception {
         return withProgram("analyzer_no_ptr_tables_other_format", ptrTableImage(), BE, STUB_BASE, p -> {
             int tx = p.startTransaction("set format");
@@ -358,7 +511,7 @@ public class RxLoaderTest extends GhidraScript {
         });
     }
 
-    /** Review focus 4: a pointer table that overlaps existing instructions is left alone. */
+    /** A pointer table that overlaps existing instructions is left alone. */
     private String analyzerPtrTableSkipsCode() throws Exception {
         long start = STUB_BASE + 0x540;
         return withProgram("analyzer_ptr_table_skips_code", ptrTableImage(), BE, STUB_BASE, p -> {
@@ -374,8 +527,7 @@ public class RxLoaderTest extends GhidraScript {
             if (before == 0) return "setup: no instructions disassembled at 0x" + Long.toHexString(start);
             String err = runAnalyzer(p);
             if (err != null) return err;
-            Data d = p.getListing().getDefinedDataContaining(addr(p, start));
-            if (d != null && d.isArray()) return "pointer array created over code: " + d.getDataType().getName();
+            if (p.getListing().getDefinedData(range, true).hasNext()) return "data created over code";
             int after = countInstructions(p, range);
             return after == before ? null : "instructions " + before + " -> " + after;
         });
@@ -399,12 +551,12 @@ public class RxLoaderTest extends GhidraScript {
             String err = runAnalyzer(p);
             if (err != null) return err;
             if (p.getListing().getInstructionAt(addr(p, insn)) == null) return "straddling instruction removed";
-            Data d = p.getListing().getDefinedDataContaining(addr(p, table));
-            return d == null ? null : "data created over code: " + d.getDataType().getName();
+            Data d = p.getListing().getDefinedData(new AddressSet(addr(p, table), addr(p, table + 63)), true).next();
+            return d == null ? null : "data created over code at " + d.getAddress() + ": " + d.getDataType().getName();
         });
     }
 
-    /** Ruling R4: user data inside a heuristic pointer table survives re-analysis. */
+    /** User data inside a heuristic pointer table survives re-analysis. */
     private String analyzerPtrTableKeepsUserData() throws Exception {
         long table = STUB_BASE + 0x540, user = table + 8;
         return withProgram("analyzer_ptr_table_keeps_user_data", ptrTableImage(), BE, STUB_BASE, p -> {
@@ -421,15 +573,15 @@ public class RxLoaderTest extends GhidraScript {
             Data d = p.getListing().getDefinedDataAt(addr(p, user));
             if (d == null || !d.getDataType().getName().equals("dword[4]"))
                 return "user data replaced: " + (d == null ? "none" : d.getDataType().getName());
-            Data t = p.getListing().getDefinedDataAt(addr(p, table));
-            return t == null ? null : "data created at table start: " + t.getDataType().getName();
+            err = checkPtrSlots(p, 0, 2); // R4 per slot: the other slots are still laid
+            return err != null ? err : checkPtrSlots(p, 6, 16);
         });
     }
 
     /** Above the RAM and PERIPH blocks the loader adds. */
     private static final long EXTRA = 0x00100000L;
 
-    /** Ruling R5: a second initialized block gets no image-base reset function. */
+    /** A second initialized block gets no image-base reset function. */
     private String analyzerEntryExtraBlock() throws Exception {
         return withProgram("analyzer_entry_extra_block", intbImage(), BE, STUB_BASE, p -> {
             int tx = p.startTransaction("setup");
@@ -447,7 +599,7 @@ public class RxLoaderTest extends GhidraScript {
         });
     }
 
-    /** Review focus 5: a vector entry pointing into a table gets no function. */
+    /** A vector entry pointing into a table gets no function. */
     private String analyzerHandlerIntoTableSkipped() throws Exception {
         byte[] img = intbImage();
         long into = INTB_ADDR + 0x10;
@@ -459,6 +611,389 @@ public class RxLoaderTest extends GhidraScript {
             if (err != null) return err;
             if (p.getFunctionManager().getFunctionAt(addr(p, into)) != null) return "function inside INTB";
             return checkFunction(p, HANDLER, null, "RTE");
+        });
+    }
+
+    /** The first INTB entry's handler in the realistic image (INTB is stored big-endian). */
+    private static long realisticHandler(RealisticImage.Image im) {
+        return Integer.toUnsignedLong(java.nio.ByteBuffer.wrap(im.raw(), (int) (im.intb() - im.base()), 4).getInt());
+    }
+
+    /**
+     * Blocks split at INTB and EXTB, and the image block renamed, before analysis. The reset entry
+     * comes from the loader's reset symbol, and the tables and handlers are laid in their own blocks.
+     */
+    private String analyzerSplitBlocks() throws Exception {
+        RealisticImage.Image im = RealisticImage.build();
+        return withProgram("analyzer_split_blocks", im.raw(), BE, im.base(), p -> {
+            splitAt(p, im.intb());
+            splitAt(p, im.extb());
+            int tx = p.startTransaction("rename");
+            try {
+                p.getMemory().getBlock(RX62TLoader.BLOCK).setName("reset");
+            }
+            finally {
+                p.endTransaction(tx, true);
+            }
+            String err = runAnalyzer(p);
+            if (err == null) err = checkLabel(p, im.intb(), "INTB");
+            if (err == null) err = checkPointerArray(p, im.intb(), 256);
+            if (err == null) err = checkLabel(p, im.extb(), "EXTB");
+            if (err == null) err = checkPointerArray(p, im.extb(), 31);
+            long handler = realisticHandler(im);
+            if (err == null) err = checkFunction(p, handler, null, "RTE");
+            if (err != null) return err;
+            Function f = p.getFunctionManager().getFunctionAt(addr(p, handler));
+            MemoryBlock b = p.getMemory().getBlock(f.getEntryPoint());
+            AddressSet body = new AddressSet(f.getBody());
+            return b.contains(body.getMinAddress()) && b.contains(body.getMaxAddress()) ? null
+                    : "handler body " + f.getBody() + " leaves block " + b.getName();
+        });
+    }
+
+    /** A second block whose first bytes set INTB is not reset code and gets no table. */
+    private String analyzerNoFalseResetScan() throws Exception {
+        long fake = EXTRA + 0x40;
+        return withProgram("analyzer_no_false_reset_scan", intbImage(), BE, STUB_BASE, p -> {
+            int tx = p.startTransaction("setup");
+            try {
+                p.getMemory().createInitializedBlock("extra", addr(p, EXTRA), 0x100, (byte) 0, monitor, false);
+                p.getMemory().setBytes(addr(p, EXTRA), bytes(0xFD, 0x73, 0x0C, (int) fake & 0xFF,
+                        (int) (fake >> 8) & 0xFF, (int) (fake >> 16) & 0xFF, 0)); // MVTC #fake,INTB
+            }
+            finally {
+                p.endTransaction(tx, true);
+            }
+            String err = runAnalyzer(p);
+            if (err != null) return err;
+            if (p.getSymbolTable().getGlobalSymbol("INTB", addr(p, fake)) != null) return "INTB label in extra block";
+            err = checkUndefined(p, fake, 0x40);
+            return err != null ? err : checkIntb(p);
+        });
+    }
+
+    /**
+     * EXTB at the fixed vector table FFFFFF80: 32 entries, the last being the reset vector. The reset entry
+     * at FFFFFF10 also puts the end of a 0x100-byte reset window past FFFFFFFF.
+     */
+    private String analyzerExtbFixed() throws Exception {
+        long base = 0xFFFFFF00L, entry = base + 0x10, handler = base + 0x40;
+        byte[] img = new byte[0x100];
+        System.arraycopy(bytes(0xFD, 0x73, 0x0D, 0x80, 0xFF, 0xFF, 0xFF, 0x02), 0, img, 0x10, 8); // MVTC #FFFFFF80,EXTB; RTS
+        img[0x40] = 0x7F;
+        img[0x41] = (byte) 0x95; // RTE
+        for (int o = 0x80; o < 0xFC; o += 4) System.arraycopy(le32(handler), 0, img, o, 4);
+        System.arraycopy(le32(entry), 0, img, 0xFC, 4);
+        return withProgram("analyzer_extb_fixed", img, LE, base, p -> {
+            String err = runAnalyzer(p);
+            if (err == null) err = checkFunction(p, entry, "reset", null);
+            if (err == null) err = checkLabel(p, 0xFFFFFF80L, "EXTB");
+            if (err == null) err = checkPointerArray(p, 0xFFFFFF80L, 32);
+            if (err == null) err = checkLabel(p, 0xFFFFFFFCL, "exc_vect_31");
+            if (err == null) err = checkComment(p, 0xFFFFFFFCL, "Reset");
+            return err != null ? err : checkFunction(p, handler, null, "RTE");
+        });
+    }
+
+    /** A reset vector into uninitialized RAM is ignored; the reset symbol at the base is used. */
+    private String analyzerResetVectorIntoRam() throws Exception {
+        long base = 0xFFFFF000L, intb = base + 0x400;
+        byte[] stub = bytes(0xFB, 0x12, (int) intb & 0xFF, (int) (intb >> 8) & 0xFF, (int) (intb >> 16) & 0xFF,
+                (int) (intb >>> 24) & 0xFF, 0xFD, 0x68, 0x1C, 3, 3, 3); // MOV.L #intb,R1; MVTC R1,INTB; 3 x NOP
+        byte[] img = new byte[0x1000];
+        byte[] sw = RX62TBEUtils.swapWords(stub);
+        System.arraycopy(sw, 0, img, 0, sw.length);
+        Arrays.fill(img, sw.length, sw.length + 4, (byte) 0xFF);
+        System.arraycopy(be32(0x00001000L), 0, img, 0xFFC, 4); // into the uninitialized RAM block
+        return withProgram("analyzer_reset_vector_into_ram", img, BE, base, p -> {
+            String err = runAnalyzer(p);
+            if (err == null) err = checkFunction(p, base, "reset", null);
+            if (err == null) err = checkLabel(p, intb, "INTB");
+            return err != null ? err : checkPointerArray(p, intb, 256);
+        });
+    }
+
+    /** A block boundary inside INTB cuts the table at the block end, with no log message. */
+    private String analyzerSplitInsideIntb() throws Exception {
+        long cut = INTB_ADDR + 0x200;
+        return withProgram("analyzer_split_inside_intb", intbImage(), BE, STUB_BASE, p -> {
+            splitAt(p, cut);
+            String err = runAnalyzer(p);
+            if (err == null) err = checkPointerArray(p, INTB_ADDR, 128);
+            if (err == null) err = checkLabel(p, INTB_ADDR + 0x1FC, "int_vect_127");
+            if (err == null) err = checkNoLabel(p, cut, "int_vect_128");
+            if (err != null) return err;
+            Data d = p.getListing().getDefinedDataContaining(addr(p, cut));
+            return d == null || !d.getAddress().equals(addr(p, INTB_ADDR)) ? null : "INTB array runs past the block end";
+        });
+    }
+
+    /** A vector entry into unmapped memory gets no function and no log message. */
+    private String analyzerHandlerUnmapped() throws Exception {
+        long nowhere = 0x00200000L;
+        byte[] img = intbImage();
+        System.arraycopy(be32(nowhere), 0, img, 0x100, 4);
+        return withProgram("analyzer_handler_unmapped", img, BE, STUB_BASE, p -> {
+            String err = runAnalyzer(p);
+            if (err != null) return err;
+            if (p.getFunctionManager().getFunctionAt(addr(p, nowhere)) != null) return "function at unmapped target";
+            return checkIntb(p);
+        });
+    }
+
+    /** Every INTB slot is labelled int_vect_NNN, NULL slots too; INTB stays primary. */
+    private String analyzerIntbSlotLabels() throws Exception {
+        byte[] img = intbImage();
+        System.arraycopy(be32(0), 0, img, 0x100 + 4 * 5, 4);
+        return withProgram("analyzer_intb_slot_labels", img, BE, STUB_BASE, p -> {
+            String err = runAnalyzer(p);
+            if (err == null) err = checkLabel(p, INTB_ADDR, "int_vect_000");
+            if (err == null) err = checkLabel(p, INTB_ADDR + 0x14, "int_vect_005");
+            if (err == null) err = checkLabel(p, INTB_ADDR + 0x3FC, "int_vect_255");
+            if (err != null) return err;
+            Symbol primary = p.getSymbolTable().getPrimarySymbol(addr(p, INTB_ADDR));
+            return primary != null && primary.getName().equals("INTB") ? null : "primary at INTB is " + primary;
+        });
+    }
+
+    /** exc_vect_00..30 on a relocated EXTB, and the manual's names as EOL comments. */
+    private String analyzerExtbSlotLabels() throws Exception {
+        long extb = EXTB_ADDR;
+        return withProgram("analyzer_extb_slot_labels", extbLeImage(), LE, EXTB_BASE, p -> {
+            String err = runAnalyzer(p);
+            for (int i = 0; i <= 30 && err == null; i++)
+                err = checkLabel(p, extb + 4 * i, String.format("exc_vect_%02d", i));
+            if (err == null) err = checkNoLabel(p, extb + 0x7C, "exc_vect_31");
+            if (err == null) err = checkComment(p, extb + 0x50, "Privileged instruction exception");
+            if (err == null) err = checkComment(p, extb + 0x78, "Non-maskable interrupt");
+            if (err == null) err = checkComment(p, extb + 0x7C, null);
+            if (err != null) return err;
+            String c = p.getListing().getDefinedDataAt(addr(p, extb)).getComponent(20).getComment(CommentType.EOL);
+            return "Privileged instruction exception".equals(c) ? null : "component 20 comment " + c;
+        });
+    }
+
+    /** A user label stays primary, a user comment is kept, and a second run adds nothing. */
+    private String analyzerSlotLabelsUserAndRerun() throws Exception {
+        long extb = EXTB_ADDR;
+        return withProgram("analyzer_slot_labels_user_and_rerun", extbLeImage(), LE, EXTB_BASE, p -> {
+            int tx = p.startTransaction("setup");
+            try {
+                p.getSymbolTable().createLabel(addr(p, extb + 0x78), "my_nmi",
+                        ghidra.program.model.symbol.SourceType.USER_DEFINED);
+                p.getListing().setComment(addr(p, extb + 0x50), CommentType.EOL, "mine");
+            }
+            finally {
+                p.endTransaction(tx, true);
+            }
+            String err = runAnalyzer(p);
+            if (err != null) return err;
+            Symbol primary = p.getSymbolTable().getPrimarySymbol(addr(p, extb + 0x78));
+            if (primary == null || !primary.getName().equals("my_nmi")) return "primary at +78h is " + primary;
+            err = checkLabel(p, extb + 0x78, "exc_vect_30");
+            if (err == null) err = checkComment(p, extb + 0x50, "mine");
+            if (err == null) err = runAnalyzer(p);
+            if (err != null) return err;
+            int n = p.getSymbolTable().getSymbols(addr(p, extb + 0x78)).length;
+            return n == 2 ? null : n + " symbols at +78h after a second run";
+        });
+    }
+
+    /** Re-creating the EXTB array (as annotation appliers do) keeps comments and labels. */
+    private String analyzerExtbCommentSurvivesRetype() throws Exception {
+        long extb = EXTB_ADDR;
+        return withProgram("analyzer_extb_comment_survives_retype", extbLeImage(), LE, EXTB_BASE, p -> {
+            String err = runAnalyzer(p);
+            if (err != null) return err;
+            int tx = p.startTransaction("retype");
+            try {
+                p.getListing().clearCodeUnits(addr(p, extb), addr(p, extb + 0x7B), false);
+                ghidra.program.model.data.DataUtilities.createData(p, addr(p, extb),
+                        new ghidra.program.model.data.ArrayDataType(ghidra.program.model.data.PointerDataType.dataType, 31, 4),
+                        -1, ghidra.program.model.data.DataUtilities.ClearDataMode.CLEAR_ALL_UNDEFINED_CONFLICT_DATA);
+            }
+            finally {
+                p.endTransaction(tx, true);
+            }
+            String c = p.getListing().getDefinedDataAt(addr(p, extb)).getComponent(20).getComment(CommentType.EOL);
+            if (!"Privileged instruction exception".equals(c)) return "component 20 comment " + c;
+            return checkLabel(p, extb + 0x50, "exc_vect_20");
+        });
+    }
+
+    /**
+     * A reset window cut short by a gap after a 0x20-byte reset block is still read up to the gap,
+     * so INTB set there is laid.
+     */
+    private String analyzerResetWindowGap() throws Exception {
+        byte[] img = new byte[0x1500];
+        System.arraycopy(bytes(0xFD, 0x73, 0x0C, 0x00, 0x20, 0x00, 0x00, 0x02), 0, img, 0, 8); // MVTC #2000h,INTB; RTS
+        for (int i = 0; i < 256; i++) System.arraycopy(le32(0x2400), 0, img, 0x1000 + 4 * i, 4);
+        img[0x1400] = 0x7F;
+        img[0x1401] = (byte) 0x95; // RTE
+        return withProgram("analyzer_reset_window_gap", img, LE, 0x1000, p -> {
+            splitAt(p, 0x1020);
+            splitAt(p, 0x2000);
+            int tx = p.startTransaction("gap");
+            try {
+                p.getMemory().removeBlock(p.getMemory().getBlock(addr(p, 0x1020)), monitor);
+            }
+            finally {
+                p.endTransaction(tx, true);
+            }
+            String err = runAnalyzer(p);
+            if (err == null) err = checkPointerArray(p, 0x2000, 256);
+            return err != null ? err : checkFunction(p, 0x2400, null, "RTE");
+        });
+    }
+
+    /** EXTB set up inside INTB is not laid over it; INTB, laid first, stays whole. */
+    private String analyzerOverlappingTables() throws Exception {
+        byte[] img = new byte[0x600];
+        System.arraycopy(bytes(0xFD, 0x73, 0x0C, 0x00, 0x11, 0x00, 0x00,   // MVTC #1100h,INTB
+                0xFD, 0x73, 0x0D, 0x40, 0x11, 0x00, 0x00, 0x02), 0, img, 0, 15);  // MVTC #1140h,EXTB; RTS
+        for (int o = 0x100; o < 0x500; o += 4) System.arraycopy(le32(0x1580), 0, img, o, 4);
+        img[0x580] = 0x7F;
+        img[0x581] = (byte) 0x95; // RTE
+        return withProgram("analyzer_overlapping_tables", img, LE, 0x1000, p -> {
+            String err = runAnalyzer(p);
+            if (err == null) err = checkPointerArray(p, 0x1100, 256);
+            if (err != null) return err;
+            Data d = p.getListing().getDefinedDataContaining(addr(p, 0x1140));
+            if (d == null || d.getAddress().getOffset() != 0x1100) return "data containing 0x1140 is " + d;
+            return checkNoLabel(p, 0x1140, "EXTB");
+        });
+    }
+
+    /** LE image at 0x1000 (0x400 bytes): RTS at 0x1000/0x1100/0x1110/0x1120, FFFFFFFF at 0x1130, slots at 0x1200. */
+    private static byte[] codePtrImage(long... slots) {
+        byte[] img = new byte[0x400];
+        for (int o : new int[] { 0x000, 0x100, 0x110, 0x120 }) img[o] = 0x02; // RTS
+        Arrays.fill(img, 0x130, 0x134, (byte) 0xFF);
+        for (int i = 0; i < slots.length; i++) System.arraycopy(le32(slots[i]), 0, img, 0x200 + 4 * i, 4);
+        return img;
+    }
+
+    /** Splits the code-pointer image into code [0x1000, 0x1200) and a non-executable data block at 0x1200. */
+    private void splitData(Program p) throws Exception {
+        splitAt(p, 0x1200);
+        int tx = p.startTransaction("data block");
+        try {
+            p.getMemory().getBlock(addr(p, 0x1200)).setExecute(false);
+        }
+        finally {
+            p.endTransaction(tx, true);
+        }
+    }
+
+    private static String checkNoFunction(Program p, long at) {
+        return p.getFunctionManager().getFunctionAt(addr(p, at)) == null ? null
+                : "unexpected function at 0x" + Long.toHexString(at);
+    }
+
+    /** A run in a data block with 4 code slots and 3 distinct targets gets functions. */
+    private String analyzerCodePtrsFunctions() throws Exception {
+        long[] slots = { 0x1100, 0x1110, 0x1100, 0x1120 };
+        return withProgram("analyzer_code_ptrs_functions", codePtrImage(slots), LE, 0x1000, p -> {
+            splitData(p);
+            String err = runAnalyzer(p);
+            for (long t : new long[] { 0x1100, 0x1110, 0x1120 })
+                if (err == null) err = checkFunction(p, t, null, "RTS");
+            for (int i = 0; i < slots.length && err == null; i++) err = checkPointer(p, 0x1200 + 4 * i, slots[i]);
+            return err;
+        });
+    }
+
+    /** One repeated target (a linker section table) gets no function. */
+    private String analyzerCodePtrsOneTarget() throws Exception {
+        return withProgram("analyzer_code_ptrs_one_target", codePtrImage(0x1100, 0x1100, 0x1100, 0x1100), LE,
+                0x1000, p -> {
+            splitData(p);
+            String err = runAnalyzer(p);
+            return err != null ? err : checkNoFunction(p, 0x1100);
+        });
+    }
+
+    /** The same bytes in a single executable block get no functions; the slots stay pointers. */
+    private String analyzerCodePtrsSingleBlock() throws Exception {
+        long[] slots = { 0x1100, 0x1110, 0x1100, 0x1120 };
+        return withProgram("analyzer_code_ptrs_single_block", codePtrImage(slots), LE, 0x1000, p -> {
+            String err = runAnalyzer(p);
+            for (long t : new long[] { 0x1100, 0x1110, 0x1120 })
+                if (err == null) err = checkNoFunction(p, t);
+            for (int i = 0; i < slots.length && err == null; i++) err = checkPointer(p, 0x1200 + 4 * i, slots[i]);
+            return err;
+        });
+    }
+
+    /** A target whose first word is FFFFFFFF (erased flash) gets no function. */
+    private String analyzerCodePtrsErasedTarget() throws Exception {
+        return withProgram("analyzer_code_ptrs_erased_target", codePtrImage(0x1100, 0x1110, 0x1120, 0x1100, 0x1130),
+                LE, 0x1000, p -> {
+            splitData(p);
+            String err = runAnalyzer(p);
+            for (long t : new long[] { 0x1100, 0x1110, 0x1120 })
+                if (err == null) err = checkFunction(p, t, null, "RTS");
+            return err != null ? err : checkNoFunction(p, 0x1130);
+        });
+    }
+
+    /** A data pointer in the run does not count, so 3 code slots make no functions. */
+    private String analyzerCodePtrsMixedData() throws Exception {
+        return withProgram("analyzer_code_ptrs_mixed_data", codePtrImage(0x1100, 0x1110, 0x1120, 0x1204), LE,
+                0x1000, p -> {
+            splitData(p);
+            String err = runAnalyzer(p);
+            for (long t : new long[] { 0x1100, 0x1110, 0x1120 })
+                if (err == null) err = checkNoFunction(p, t);
+            return err;
+        });
+    }
+
+    /** {handler, flag} entries: one non-zero dword between code slots keeps the run, so all targets get functions. */
+    private String analyzerCodePtrsFlagGaps() throws Exception {
+        long f = 0x01000000L;
+        return withProgram("analyzer_code_ptrs_flag_gaps", codePtrImage(0x1100, f, 0x1110, 0, 0x1120, f, 0x1100), LE,
+                0x1000, p -> {
+            splitData(p);
+            String err = runAnalyzer(p);
+            for (long t : new long[] { 0x1100, 0x1110, 0x1120 })
+                if (err == null) err = checkFunction(p, t, null, "RTS");
+            return err;
+        });
+    }
+
+    /** A run in a data block that overlaps instructions is left alone, as for laid pointer runs. */
+    private String analyzerCodePtrsSkipsCode() throws Exception {
+        long[] slots = { 0x1100, 0x1110, 0x1100, 0x1120 };
+        return withProgram("analyzer_code_ptrs_skips_code", codePtrImage(slots), LE, 0x1000, p -> {
+            splitData(p);
+            AddressSet range = new AddressSet(addr(p, 0x1200), addr(p, 0x1200 + 16 - 1));
+            int tx = p.startTransaction("disassemble");
+            try {
+                new DisassembleCommand(range, range, false).applyTo(p, monitor);
+            }
+            finally {
+                p.endTransaction(tx, true);
+            }
+            if (countInstructions(p, range) == 0) return "setup: no instructions disassembled at 0x1200";
+            String err = runAnalyzer(p);
+            for (long t : new long[] { 0x1100, 0x1110, 0x1120 })
+                if (err == null) err = checkNoFunction(p, t);
+            return err;
+        });
+    }
+
+    /** Two non-code dwords in a row end the run: two halves of 2 code slots each make no functions. */
+    private String analyzerCodePtrsTwoGaps() throws Exception {
+        long f = 0x01000000L;
+        return withProgram("analyzer_code_ptrs_two_gaps", codePtrImage(0x1100, 0x1110, f, f, 0x1120, 0x1100), LE,
+                0x1000, p -> {
+            splitData(p);
+            String err = runAnalyzer(p);
+            for (long t : new long[] { 0x1100, 0x1110, 0x1120 })
+                if (err == null) err = checkNoFunction(p, t);
+            return err;
         });
     }
 
@@ -484,9 +1019,12 @@ public class RxLoaderTest extends GhidraScript {
             if (err == null) err = checkLabel(p, im.intb(), "INTB");
             if (err == null) err = checkPointerArray(p, im.intb(), 256);
             if (err == null) err = checkLabel(p, im.extb(), "EXTB");
-            if (err == null) err = checkPointerArray(p, im.extb(), 32);
+            if (err == null) err = checkPointerArray(p, im.extb(), 31);
             RX62TBEUtils.Range ptrs = im.pointers();
-            if (err == null) err = checkPointerArray(p, base + ptrs.start(), (ptrs.end() - ptrs.start()) / 4);
+            for (int o = ptrs.start(); o < ptrs.end() && err == null; o += 4) {
+                long target = Integer.toUnsignedLong(java.nio.ByteBuffer.wrap(raw, o, 4).getInt());
+                if (target != 0) err = checkPointer(p, base + o, target);
+            }
             long handler = Integer.toUnsignedLong(java.nio.ByteBuffer.wrap(raw, (int) (im.intb() - base), 4).getInt());
             return err != null ? err : checkFunction(p, handler, null, "RTE");
         });
@@ -555,7 +1093,7 @@ public class RxLoaderTest extends GhidraScript {
                 });
     }
 
-    /** Review focus 1: an image at 0 overlaps RAM, which is skipped with a log line; PERIPH is still added. */
+    /** An image at 0 overlaps RAM, which is skipped with a log line; PERIPH is still added. */
     private String memmapOverlap() throws Exception {
         byte[] img = leStubImage();
         MessageLog log = new MessageLog();
@@ -586,6 +1124,76 @@ public class RxLoaderTest extends GhidraScript {
         });
     }
 
+    private static final String SCALAR_REFS = "Scalar Operand References";
+
+    /**
+     * {@code MOV.L #0x00001410,R1} (a RAM address), {@code MOV.L #<base+0x20>,R2} (a flash address),
+     * {@code RTS}, then NOPs: two immediates that only Ghidra's Scalar Operand References analyzer turns
+     * into references.
+     */
+    private static byte[] scalarImage(long base) {
+        byte[] img = new byte[0x40];
+        Arrays.fill(img, (byte) 0x03);
+        long flash = base + 0x20;
+        byte[] code = { (byte) 0xFB, 0x12, 0x10, 0x14, 0x00, 0x00,
+                (byte) 0xFB, 0x22, (byte) flash, (byte) (flash >> 8), (byte) (flash >> 16), (byte) (flash >> 24), 0x02 };
+        System.arraycopy(code, 0, img, 0, code.length);
+        return img;
+    }
+
+    /** Runs auto-analysis over the whole program, the way analyzeHeadless does. */
+    private void autoAnalyze(Program p) {
+        int tx = p.startTransaction("analyze");
+        try {
+            ghidra.app.plugin.core.analysis.AutoAnalysisManager mgr =
+                    ghidra.app.plugin.core.analysis.AutoAnalysisManager.getAnalysisManager(p);
+            mgr.initializeOptions();
+            mgr.reAnalyzeAll(null);
+            mgr.startAnalysis(monitor);
+        }
+        finally {
+            p.endTransaction(tx, true);
+        }
+    }
+
+    /** Null when the instruction at {@code from} has an operand reference to {@code to}. */
+    private static String checkOperandRef(Program p, long from, long to) {
+        Address f = p.getAddressFactory().getDefaultAddressSpace().getAddress(from);
+        for (ghidra.program.model.symbol.Reference r : p.getReferenceManager().getReferencesFrom(f))
+            if (r.getToAddress().getOffset() == to && r.getOperandIndex() >= 0) return null;
+        return String.format("no operand reference %08X -> %08X", from, to);
+    }
+
+    /**
+     * Ghidra turns Scalar Operand References off by default when the program's minimum address is 0, so
+     * the RAM block at 0 would silently disable it. With the memory map the loader keeps it on, as it is
+     * without the map, and the immediates become references: into RAM, and into flash as with the map off.
+     */
+    private String memmapScalarRefs() throws Exception {
+        String err = withProgram("memmap_scalar_refs", scalarImage(STUB_BASE), LE, STUB_BASE, p -> {
+            if (p.getMemory().getBlock("RAM") == null) return "no RAM block; blocks " + blockNames(p);
+            autoAnalyze(p);
+            String e = checkOperandRef(p, STUB_BASE, 0x1410);
+            return e != null ? e : checkOperandRef(p, STUB_BASE + 6, STUB_BASE + 0x20);
+        });
+        if (err != null) return "memory map on: " + err;
+        err = withProgram("memmap_scalar_refs_off", scalarImage(STUB_BASE), LE, STUB_BASE, RX62TLoader.class,
+                List.of("-loader-rxMemoryMap", "false"), new MessageLog(), p -> {
+                    autoAnalyze(p);
+                    return checkOperandRef(p, STUB_BASE + 6, STUB_BASE + 0x20);
+                });
+        return err == null ? null : "memory map off: " + err;
+    }
+
+    /** An image at 0 starts the program at 0 by itself: the loader leaves Ghidra's default (off) alone. */
+    private String memmapScalarImageAtZero() throws Exception {
+        return withProgram("memmap_scalar_image_at_zero", leStubImage(), LE, 0, p -> {
+            ghidra.framework.options.Options o = p.getOptions(Program.ANALYSIS_PROPERTIES);
+            return o.contains(SCALAR_REFS) ? SCALAR_REFS + " set for an image at 0: " + o.getBoolean(SCALAR_REFS, false)
+                    : null;
+        });
+    }
+
     private static final String PARAM_ID = "Decompiler Parameter ID";
 
     private String paramIdDefault() throws Exception {
@@ -604,7 +1212,7 @@ public class RxLoaderTest extends GhidraScript {
         });
     }
 
-    /** Review focus 2: only this loader turns Parameter ID on; a BinaryLoader import of the same bytes does not. */
+    /** Only this loader turns Parameter ID on; a BinaryLoader import of the same bytes does not. */
     private String paramIdOnlyThisLoader() throws Exception {
         return withProgram("param_id_only_this_loader", intbImage(), BE, STUB_BASE, BinaryLoader.class, p -> {
             if (!BinaryLoader.BINARY_NAME.equals(p.getExecutableFormat())) return "executable format " + p.getExecutableFormat();
@@ -620,7 +1228,7 @@ public class RxLoaderTest extends GhidraScript {
     }
 
     /**
-     * Ruling R3: Add To Program (Loader.loadInto, which the GUI's Add To Program runs with options from
+     * Add To Program (Loader.loadInto, which the GUI's Add To Program runs with options from
      * getDefaultOptions(..., loadIntoProgram=true, ...)) adds the image only: the memory-map option
      * defaults to false and the program's Parameter ID setting is left alone. A fresh import still
      * defaults the option to true.
@@ -762,6 +1370,69 @@ public class RxLoaderTest extends GhidraScript {
         }
     }
 
+    /** Only ANALYSIS signatures with no parameters go back to DEFAULT; the others are left alone. */
+    private String unlockSignatures() throws Exception {
+        long[] at = { 0x1000, 0x1008, 0x1010, 0x1018 };
+        ghidra.program.model.symbol.SourceType A = ghidra.program.model.symbol.SourceType.ANALYSIS;
+        return withProgram("unlock_signatures", nops(0x20), LE, 0x1000, p -> {
+            int tx = p.startTransaction("setup");
+            try {
+                for (long a : at) {
+                    AddressSet body = new AddressSet(addr(p, a), addr(p, a + 3));
+                    new DisassembleCommand(addr(p, a), body, true).applyTo(p, monitor);
+                    p.getFunctionManager().createFunction("f" + Long.toHexString(a), addr(p, a), body, A);
+                }
+                Function withParam = p.getFunctionManager().getFunctionAt(addr(p, 0x1008));
+                withParam.replaceParameters(List.of(new ghidra.program.model.listing.ParameterImpl("a",
+                        ghidra.program.model.data.IntegerDataType.dataType, p)),
+                        Function.FunctionUpdateType.DYNAMIC_STORAGE_ALL_PARAMS, true, A);
+                ghidra.program.model.symbol.SourceType[] src = { A, A,
+                        ghidra.program.model.symbol.SourceType.USER_DEFINED,
+                        ghidra.program.model.symbol.SourceType.IMPORTED };
+                for (int i = 0; i < at.length; i++)
+                    p.getFunctionManager().getFunctionAt(addr(p, at[i])).setSignatureSource(src[i]);
+            }
+            finally {
+                p.endTransaction(tx, true);
+            }
+            runOn(p, "RxUnlockSignatures.java");
+            List<String> got = new ArrayList<>();
+            for (long a : at) got.add(p.getFunctionManager().getFunctionAt(addr(p, a)).getSignatureSource().name());
+            List<String> want = List.of("DEFAULT", "ANALYSIS", "USER_DEFINED", "IMPORTED");
+            return got.equals(want) ? null : "signature sources " + got + ", want " + want;
+        });
+    }
+
+    /** A program of another processor is left untouched by RxUnlockSignatures. */
+    private String unlockSignaturesRefuses() throws Exception {
+        try (LoadResults<Program> results = ProgramLoader.builder().source(nops(0x20)).name("refuse")
+                .loaders(BinaryLoader.class).language("x86:LE:32:default").compiler("gcc")
+                .addLoaderArg("-loader-baseAddr", "0x1000").log(new MessageLog()).monitor(monitor).load()) {
+            Program p = results.getPrimaryDomainObject(this);
+            try {
+                int tx = p.startTransaction("setup");
+                try {
+                    AddressSet set = new AddressSet(addr(p, 0x1000), addr(p, 0x1003));
+                    new DisassembleCommand(addr(p, 0x1000), set, true).applyTo(p, monitor);
+                    Function f = p.getFunctionManager().createFunction("f", addr(p, 0x1000), set,
+                        ghidra.program.model.symbol.SourceType.ANALYSIS);
+                    f.setSignatureSource(ghidra.program.model.symbol.SourceType.ANALYSIS);
+                }
+                finally {
+                    p.endTransaction(tx, true);
+                }
+                runOn(p, "RxUnlockSignatures.java");
+                Function f = p.getFunctionManager().getFunctionAt(addr(p, 0x1000));
+                if (f == null) return "setup: no function";
+                return f.getSignatureSource() == ghidra.program.model.symbol.SourceType.ANALYSIS ? null
+                        : "signature source changed to " + f.getSignatureSource() + " on a non-RX program";
+            }
+            finally {
+                p.release(this);
+            }
+        }
+    }
+
     // ---- loading and checks ----
 
     private interface Case {
@@ -844,13 +1515,18 @@ public class RxLoaderTest extends GhidraScript {
 
     /** Runs RX62TAnalyzer.added over all of memory in a transaction; returns null when it reports success. */
     private String runAnalyzer(Program p) throws Exception {
+        return runAnalyzer(p, p.getMemory());
+    }
+
+    /** Runs RX62TAnalyzer.added over {@code set} in a transaction; returns null when it reports success. */
+    private String runAnalyzer(Program p, ghidra.program.model.address.AddressSetView set) throws Exception {
         RX62TAnalyzer analyzer = new RX62TAnalyzer();
         if (!analyzer.canAnalyze(p)) return "canAnalyze false for " + p.getLanguageID();
         MessageLog log = new MessageLog();
         boolean ok;
         int tx = p.startTransaction("RX62T analyzer");
         try {
-            ok = analyzer.added(p, p.getMemory(), monitor, log);
+            ok = analyzer.added(p, set, monitor, log);
         }
         finally {
             p.endTransaction(tx, true);
@@ -859,9 +1535,52 @@ public class RxLoaderTest extends GhidraScript {
         return log.hasMessages() ? "analyzer log: " + log.toString().trim() : null;
     }
 
+    /** Null when a single (non-array) 4-byte pointer is at {@code at} with a reference to {@code target}. */
+    private static String checkPointer(Program p, long at, long target) {
+        Data d = p.getListing().getDefinedDataAt(addr(p, at));
+        String where = "0x" + Long.toHexString(at);
+        if (d == null) return "no data at " + where;
+        if (d.isArray() || !(d.getDataType() instanceof ghidra.program.model.data.Pointer) || d.getLength() != 4)
+            return "data at " + where + " is " + d.getDataType().getName() + " (want pointer)";
+        for (ghidra.program.model.symbol.Reference r : p.getReferenceManager().getReferencesFrom(addr(p, at)))
+            if (r.getToAddress().getOffset() == target) return null;
+        return "no reference from " + where + " to 0x" + Long.toHexString(target);
+    }
+
+    /** Splits the block containing {@code at} so that a new block starts there. */
+    private void splitAt(Program p, long at) throws Exception {
+        int tx = p.startTransaction("split");
+        try {
+            Memory mem = p.getMemory();
+            mem.split(mem.getBlock(addr(p, at)), addr(p, at));
+        }
+        finally {
+            p.endTransaction(tx, true);
+        }
+    }
+
+    /** Null when [at, at+len) holds no instruction and no defined data. */
+    private static String checkUndefined(Program p, long at, int len) {
+        if (p.getListing().isUndefined(addr(p, at), addr(p, at + len - 1))) return null;
+        ghidra.program.model.listing.CodeUnit cu = p.getListing().getDefinedDataContaining(addr(p, at));
+        return "not undefined at 0x" + Long.toHexString(at) + (cu == null ? "" : ": " + cu);
+    }
+
     private static String checkLabel(Program p, long at, String name) {
         Symbol s = p.getSymbolTable().getGlobalSymbol(name, addr(p, at));
         return s != null ? null : "no label " + name + " at 0x" + Long.toHexString(at);
+    }
+
+    /** Null when the EOL comment at {@code at} equals {@code want}; a null {@code want} means no comment. */
+    private static String checkComment(Program p, long at, String want) {
+        String got = p.getListing().getComment(CommentType.EOL, addr(p, at));
+        return java.util.Objects.equals(got, want) ? null
+                : "EOL comment at 0x" + Long.toHexString(at) + " is " + got + ", want " + want;
+    }
+
+    private static String checkNoLabel(Program p, long at, String name) {
+        return p.getSymbolTable().getGlobalSymbol(name, addr(p, at)) == null ? null
+                : "unexpected label " + name + " at 0x" + Long.toHexString(at);
     }
 
     private static String checkPointerArray(Program p, long at, int count) {
@@ -915,7 +1634,7 @@ public class RxLoaderTest extends GhidraScript {
         return img;
     }
 
-    /** The stub image with 16 BE pointers (to base+0x5C0) at offset 0x540 (ruling R1). */
+    /** The stub image with 16 BE pointers (to base+0x5C0) at offset 0x540. */
     private static byte[] ptrTableImage() {
         byte[] img = stubImage();
         for (int i = 0; i < 16; i++) System.arraycopy(be32(STUB_BASE + 0x5C0), 0, img, 0x540 + 4 * i, 4);

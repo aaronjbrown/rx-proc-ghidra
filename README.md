@@ -48,13 +48,17 @@ RAM and I/O registers resolve:
 A block that would overlap the image (or any other existing block) is skipped whole, and the import
 log says so.
 
+Ghidra turns its *Scalar Operand References* analyzer (which makes references from immediates such as `MOV.L #imm32,Rn`) off by default for a program whose minimum address is 0, and the `RAM` block makes it 0. So when the image itself is not at 0, the loader turns that analyzer on, as it would be without the blocks. Blocks added later, for example by a pre-script, do not change the default, because Ghidra picks the defaults when the program is opened for analysis.
+
+Programs imported with the memory map by a loader before 0.4.0 have the analyzer off: re-import them, or turn *Scalar Operand References* on in the auto-analysis options before analysing.
+
 The loader also turns on the *Decompiler Parameter ID* analyzer for the program (Ghidra enables it
 by default only for PE files), which gives better function signatures. Programs from other loaders
 (ELF, *Raw Binary*) are left as Ghidra sets them: enable it by hand in the auto-analysis options, or
 headless in a pre-script.
 
 With *File → Add To Program*, the loader adds only the image: *Add RX RAM and peripheral I/O blocks*
-defaults to off there, and the program's *Decompiler Parameter ID* setting is left unchanged.
+defaults to off there, and the program's analysis options (*Decompiler Parameter ID*, *Scalar Operand References*) are left unchanged.
 
 The loader decides which 32-bit words are code with a statistical code/data model (a byte-pair model
 of code trained on the image itself, smoothed into long sections) and un-swaps only those. Constant
@@ -63,17 +67,32 @@ are kept in the program. The loader adds the entry point `reset`. It is read fro
 at `0xFFFFFFFC` if the image covers it and the vector points into the image. Otherwise it is the
 image base.
 
-The *RX62T Platform Setup* analyzer runs during auto-analysis. It makes a function at `reset`. It
-reads INTB and EXTB from the reset code, lays them down as labelled pointer arrays and makes
-functions at their handlers. It also types the other in-image pointer tables, skipping any that
-overlap code or defined data. It reads memory as loaded, so it gives the same result for an image
-already in fetch order (un-swapped beforehand) imported with Ghidra's own *Raw Binary* loader. For a
-little-endian image, use the *RX62T Raw Binary* loader with `rx62t:LE:32:default`: it loads the
-file verbatim.
+The *RX62T Platform Setup* analyzer runs during auto-analysis. It finds the reset entry from the
+reset vector, else the `reset` symbol, else the image base, and makes a function there. It reads
+INTB and EXTB from the reset code at that entry, lays them down as labelled pointer arrays in
+whichever blocks hold them, and makes functions at their handlers. INTB is `pointer[256]`. EXTB is
+`pointer[31]` (ExtBase+00h to +78h), or `pointer[32]` at `0xFFFFFF80`, where the last slot is the
+reset vector. Every INTB slot is labelled `int_vect_NNN` (vector number, NULL slots included) and
+every EXTB slot `exc_vect_NN`. EXTB slots 20, 21, 23, 24, 25 and 30 (and 31 at `0xFFFFFF80`) get the
+manual's name as an EOL comment, such as `Non-maskable interrupt`; a slot that already has an EOL
+comment keeps it, and a user's label stays primary. It also marks the other pointer runs, one
+`pointer` per slot and never as an array, so typing any entry later keeps its neighbours and their
+references. A pointer may target any initialized block. Runs that overlap code are skipped, and
+slots that already hold data are left alone. For a run in a **non-executable** block of at least
+4 slots pointing into executable code, with at least 2 distinct targets, it makes functions at
+those targets (dispatch tables). One dword of any value may sit between two such slots, so tables
+of {handler, flag} entries count; two in a row end the run. A raw image imported as one block is executable
+everywhere, so it gets no such functions until the image is split into code and data blocks with
+correct execute flags, by hand in the Memory Map or in a pre-analysis script. Splitting blocks does
+not re-run the analyzer: after a split by hand, run *Analysis → One Shot → RX62T Platform Setup*.
+It reads memory as loaded, so it gives the same result for an image already in fetch order (un-swapped beforehand)
+imported with Ghidra's own *Raw Binary* loader. For a little-endian image, use the *RX62T Raw
+Binary* loader with `rx62t:LE:32:default`: it loads the file verbatim.
 
-The loader and the analyzer are only in an extension installed from a checkout (see
-[From source](#from-source)). The release zip holds the language files and `ghidra_scripts/`, but
-no loader jar.
+The loader and the analyzer are only in an extension built from a checkout: either a local zip
+built with the jar (see [From a local zip with the loader](#from-a-local-zip-with-the-loader)) or
+an install from source (see [From source](#from-source)). The release zip holds the language files
+and `ghidra_scripts/`, but no loader jar.
 
 ## Install
 
@@ -88,10 +107,29 @@ A release zip installs only into the Ghidra version in its name. For example,
 
 If an older RX62T is listed, uninstall it and restart Ghidra first.
 
+A zip without the jar gives the languages and the scripts only: no *RX62T Raw Binary* loader and no
+*RX62T Platform Setup* analyzer.
+
 To build the zip yourself, run `tools/build_release.sh`. It writes the zip to `dist/`. It compiles
 the `.sla` files with the SLEIGH compiler of the Ghidra in `GHIDRA_INSTALL_DIR`. If that is unset,
 it uses the Flatpak (`GHIDRA_FLATPAK=org.ghidra_sre.Ghidra`). The zip holds the language files and
 `ghidra_scripts/`. The loader and analyzer under `src/` are not in the zip.
+
+### From a local zip with the loader
+
+To get the loader and the analyzer while working only in the Ghidra GUI, build a zip that includes
+`lib/RX62T.jar`:
+
+1. Clone this repository.
+2. Run `tools/build_release.sh --with-jar` (prefix it with `GHIDRA_INSTALL_DIR=<ghidra install>`
+   for a native Ghidra; without it, the Flatpak is used). It writes
+   `dist/ghidra_<version>_PUBLIC_<date>_RX62T-local.zip`, built from the committed sources of
+   `HEAD` or of the revision given after the flag.
+3. In Ghidra, open *File → Install Extensions*, click `+` and pick the `-local` zip.
+4. Restart Ghidra.
+
+The `-local` zip is for your own machine only. Upstream states no licence, so do not publish or
+share it; the script prints a notice saying so.
 
 ### From source
 
@@ -128,7 +166,7 @@ and the old definition can win. The log then shows
 
 ## Scripts
 
-Two scripts ship in `ghidra_scripts/` (Script Manager, category `RX`). Both are self-contained and
+Three scripts ship in `ghidra_scripts/` (Script Manager, category `RX`). All are self-contained and
 do not need the loader jar.
 
 - `RxOrphanFunctions.java`: run after auto-analysis. Creates functions for disassembled code that
@@ -137,6 +175,12 @@ do not need the loader jar.
   RX62T Raw Binary loader turns it on). Gives functions still on the `unknown` calling convention
   the cspec default and sets returns with no found value to `void`. User-defined signatures are
   left alone. It refuses programs whose language is not an `rx62t` language.
+- `RxUnlockSignatures.java`: run when `RxFixSignatures` ran before Decompiler Parameter ID had
+  finished (mainly in the GUI), so functions were left with locked, parameterless signatures. It
+  sets each function whose signature source is ANALYSIS and that has no parameters back to DEFAULT;
+  user-defined and imported signatures are left alone. Then run *Analysis → One Shot → Decompiler
+  Parameter ID*, and `RxFixSignatures` again. It refuses programs whose language is not an `rx62t`
+  language.
 
 ## Known gaps
 
@@ -146,13 +190,17 @@ do not need the loader jar.
 - **Leftover `in_stack_*` parameters.** These remain mostly where data tables were disassembled as
   code. That is mainly a seeding problem in the analysed image. A calling-convention cause has not
   been ruled out.
-- **Pointer-table detection is heuristic.** It runs only for raw-image imports (*RX62T Raw Binary*
+- **Pointer-run detection is heuristic.** It runs only for raw-image imports (*RX62T Raw Binary*
   and *Raw Binary*); for other formats, such as ELF, the analyzer lays only the reset entry, the
-  INTB/EXTB vector tables and their handlers. The analyzer lays detected pointer tables before it
-  disassembles the reset code and handlers, so a false-positive pointer table over real code would
-  stop disassembly at that point. For raw images based at 0, zeros and small integers look like
-  pointers, so tables can be over-detected. For big-endian images imported with the *RX62T Raw
-  Binary* loader, detected pointer tables are already classified as data.
+  INTB/EXTB vector tables and their handlers. A run only marks its slots as pointers (one `pointer`
+  per slot); it does not say where a table starts or ends, so the analyzer never types runs as
+  arrays. The analyzer marks pointer runs before it disassembles the reset code and handlers, so a
+  false-positive run over real code would stop disassembly at that point. For raw images based at
+  0, zeros and small integers look like pointers, so runs can be over-detected. The same happens
+  in any image when an *initialized* block sits at address 0, such as RAM added through the Memory
+  Map dialog with its default of initialized: tables of small integers then read as pointers into
+  it and are marked one pointer per slot. For big-endian images imported with the *RX62T Raw Binary*
+  loader, detected pointer runs are already classified as data.
 
 ## Testing
 
@@ -183,3 +231,8 @@ its exact code/data/fill blocks, and the full load and analysis of it. For the l
 `test/run_tests.sh` also compiles `src/test/java` into `lib/RX62T-tests.jar` of the staged extension
 only; that jar is never installed or released. Every test needs only a checkout and Ghidra: no
 other files or environment variables.
+
+`tools/test_install.sh` tests the install script, and `tools/test_release.sh` tests
+`tools/build_release.sh`: the plain and `--with-jar` zips, a jar built from a given revision, a
+failed jar build, and a headless Ghidra run that loads the loader and the analyzer from the
+installed `-local` zip. Both work in scratch directories under `$HOME` only.
